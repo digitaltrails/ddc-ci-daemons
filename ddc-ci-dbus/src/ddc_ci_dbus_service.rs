@@ -456,8 +456,21 @@ impl DdcCiDbusService {
         edid_txt: &str,
         flags: u32,
     ) -> (f64, i32, String) {
-        // TODO: call ddcutil backend
-        (1.0, 0, String::new())
+
+        let ddc_operation = || -> Result<(f64, i32, String), ddcutil::Error> {
+            let dref = ddcutil::find_display(
+                Option::Some(display_number.into()),
+                Option::Some(edid_txt),
+                flags & EDID_PREFIX_ALLOWED != 0,
+            )?;
+            let multiplier = ddcutil::get_sleep_multiplier(dref)?;
+            Ok((multiplier, 0, "OK".to_string()))
+        };
+
+        match ddc_operation() {
+            Ok((multiplier, status, message)) => (multiplier, status, message),
+            Err(e) => (0.0, error_code(&e), error_message("GetSleepMultiplier", &e)),
+        }
     }
 
     /// Sets the sleep multiplier.
@@ -468,8 +481,20 @@ impl DdcCiDbusService {
         new_multiplier: f64,
         flags: u32,
     ) -> (i32, String) {
-        // TODO: call ddcutil backend
-        (0, String::new())
+        let ddc_operation = || -> Result<(i32, String), ddcutil::Error> {
+            let dref = ddcutil::find_display(
+                Option::Some(display_number.into()),
+                Option::Some(edid_txt),
+                flags & EDID_PREFIX_ALLOWED != 0,
+            )?;
+            ddcutil::set_sleep_multiplier(dref, new_multiplier)?;
+            Ok((0, "OK".to_string()))
+        };
+
+        match ddc_operation() {
+            Ok((status, message)) => (status, message),
+            Err(e) => (error_code(&e), error_message("SetSleepMultiplier", &e)),
+        }
     }
 
     // ── Signals ────────────────────────────────────────────────────────
