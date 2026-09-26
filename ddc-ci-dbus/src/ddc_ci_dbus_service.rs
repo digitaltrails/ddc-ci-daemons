@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use log::{error};
 use zbus::interface;
 use zbus::object_server::SignalEmitter;
+use ddcutil_backend::ddcutil::{CapabilitiesData, VcpFeatureMetadata};
 
 const DETECT_ALL: u32 = 8;
 const EDID_PREFIX_ALLOWED: u32 = 1;
@@ -203,27 +204,20 @@ impl DdcCiDbusService {
         flags: u32,
     ) -> (u16, u16, String, i32, String) {
 
-        let err_result = |e: ddcutil::Error| -> (u16, u16, String, i32, String) {
-            let code: i32 = e.status_code().try_into().unwrap_or(0);
-            (0, 0, "".to_string(), code, format!("GetVcp: {}", e))
+        let ddc_operation = || -> Result<(u16, u16, String, i32, String), ddcutil::Error> {
+            let dref = ddcutil::find_display(
+                Option::Some(display_number.into()),
+                Option::Some(edid_txt),
+                flags & EDID_PREFIX_ALLOWED != 0,
+            )?;
+            let handle = ddcutil::open_display(dref)?;
+            let (current, max, formatted) = ddcutil::get_vcp(&handle, vcp_code)?;
+            Ok((current as u16, max as u16, formatted, 0, "OK".to_string()))
         };
 
-        let dref = match ddcutil::find_display(
-            Option::Some(display_number.into()),
-            Option::Some(edid_txt),
-            flags & EDID_PREFIX_ALLOWED != 0) {
-            Ok(dref) => dref,
-            Err(e) => return err_result(e),
-        };
-
-        let handle = match ddcutil::open_display(dref) {
-            Ok(handle) => handle,
-            Err(e) => return err_result(e),
-        };
-
-        match ddcutil::get_vcp(&handle, vcp_code as u8) {
-            Ok((current, max, formatted)) => (current as u16, max as u16, formatted, 0, "OK".to_string(),),
-            Err(e) => err_result(e),
+        match ddc_operation() {
+            Ok((current, max, formatted, status, message)) => (current, max, formatted, status, message),
+            Err(e) => (0, 0, String::new(), error_code(&e), error_message("GetVcp", &e)),
         }
     }
 
@@ -236,36 +230,25 @@ impl DdcCiDbusService {
         flags: u32,
     ) -> (Vec<(u8, u16, u16, String)>, i32, String) {
 
-        let err_result = |e: ddcutil::Error| -> (Vec<(u8, u16, u16, String)>, i32, String) {
-            let code: i32 = e.status_code().try_into().unwrap_or(0);
-            (vec![], code, format!("GetMultipleVcp: {}", e))
-        };
-
-        let dref = match ddcutil::find_display(
-            Option::Some(display_number.into()),
-            Option::Some(edid_txt),
-            flags & EDID_PREFIX_ALLOWED != 0) {
-            Ok(dref) => dref,
-            Err(e) => return err_result(e),
-        };
-
-        let handle = match ddcutil::open_display(dref) {
-            Ok(handle) => handle,
-            Err(e) => return err_result(e),
-        };
-
-        let mut values = Vec::new();
-        for &code in vcp_codes {
-            match ddcutil::get_vcp(&handle, code as u8) {
-                Ok((current, max, formatted)) => {
-                    values.push((code, current as u16, max as u16, formatted));
-                }
-                Err(e) => {
-                    return err_result(e);
-                }
+        let ddc_operation = || -> Result<(Vec<(u8, u16, u16, String)>, i32, String), ddcutil::Error> {
+            let dref = ddcutil::find_display(
+                Option::Some(display_number.into()),
+                Option::Some(edid_txt),
+                flags & EDID_PREFIX_ALLOWED != 0,
+            )?;
+            let handle = ddcutil::open_display(dref)?;
+            let mut values = Vec::new();
+            for &code in vcp_codes {
+                let (current, max, formatted) = ddcutil::get_vcp(&handle, code as u8)?;
+                values.push((code, current as u16, max as u16, formatted));
             }
+            Ok((values, 0, "OK".to_string()))
+        };
+
+        match ddc_operation() {
+            Ok((values, status, message)) => (values, status, message),
+            Err(e) => (vec![], error_code(&e), error_message("GetMultipleVcp", &e)),
         }
-        (values, 0, "OK".to_string(),)
     }
 
     /// Sets a VCP value.
@@ -306,43 +289,35 @@ impl DdcCiDbusService {
         flags: u32,
     ) -> (i32, String) {
 
-        let err_result = |e: ddcutil::Error| -> (i32, String) {
-            let code: i32 = e.status_code().try_into().unwrap_or(0);
-            (code, format!("SetVcp: {}", e))
+        let ddc_operation = || -> Result<(i32, String), ddcutil::Error> {
+            let dref = ddcutil::find_display(
+                Option::Some(display_number.into()),
+                Option::Some(edid_txt),
+                flags & EDID_PREFIX_ALLOWED != 0,
+            )?;
+            let handle = ddcutil::open_display(dref)?;
+            ddcutil::set_vcp(&handle, vcp_code as u8, vcp_new_value, flags & NO_VERIFY != 0)?;
+
+            let sender_str: String = hdr.sender()
+                .map(|name| name.to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+            let _ = zbus::block_on(async { Self::vcp_value_changed(
+                &emitter,
+                display_number,
+                edid_txt,
+                vcp_code,
+                vcp_new_value,
+                &sender_str,
+                client_context,
+                flags,
+            ).await}).map_err(|e| eprintln!("SetVcp: error on signaling change {}", e));
+
+            Ok((0, "OK".to_string()))
         };
 
-        let dref = match ddcutil::find_display(
-            Option::Some(display_number.into()),
-            Option::Some(edid_txt),
-            flags & EDID_PREFIX_ALLOWED != 0) {
-            Ok(dref) => dref,
-            Err(e) => return err_result(e),
-        };
-
-        let handle = match ddcutil::open_display(dref) {
-            Ok(handle) => handle,
-            Err(e) => return err_result(e),
-        };
-
-        match ddcutil::set_vcp(&handle, vcp_code as u8, vcp_new_value, flags & NO_VERIFY != 0) {
-            Ok(()) => {
-                let sender_str: String = hdr.sender()
-                    .map(|name| name.to_string())
-                    .unwrap_or_else(|| "unknown".to_string());
-
-                let _ = zbus::block_on(async { Self::vcp_value_changed(
-                    &emitter,
-                    display_number,
-                    edid_txt,
-                    vcp_code,
-                    vcp_new_value,
-                    &sender_str,
-                    client_context,
-                    flags,
-                ).await}).map_err(|e| eprintln!("SetVcp: error on signaling change {}", e));
-                (0, "OK".to_string(),)
-            },
-            Err(e) => err_result(e),
+        match ddc_operation() {
+            Ok((status, message)) => (status, message),
+            Err(e) => (error_code(&e), error_message("SetVcpWithContext", &e)),
         }
     }
 
@@ -355,36 +330,19 @@ impl DdcCiDbusService {
         flags: u32,
     ) -> (String, String, bool, bool, bool, bool, bool, i32, String) {
 
-        let err_result = |e: ddcutil::Error| -> (String, String, bool, bool, bool, bool, bool, i32, String) {
-            let code: i32 = e.status_code().try_into().unwrap_or(0);
-            (
-                "Feature".into(),
-                "Description".into(),
-                false,
-                false,
-                true,
-                false,
-                false,
-                code,
-                format!("GetVcpMetadata: {}", e),
-            )
+        let ddc_operation = || -> Result<(VcpFeatureMetadata, i32, String), ddcutil::Error> {
+            let dref = ddcutil::find_display(
+                Option::Some(display_number.into()),
+                Option::Some(edid_txt),
+                flags & EDID_PREFIX_ALLOWED != 0,
+            )?;
+            let handle = ddcutil::open_display(dref)?;
+            let metadata = ddcutil::get_vcp_metadata(&handle, vcp_code.into())?;
+            Ok((metadata, 0, "OK".to_string()))
         };
 
-        let dref = match ddcutil::find_display(
-            Option::Some(display_number.into()),
-            Option::Some(edid_txt),
-            flags & EDID_PREFIX_ALLOWED != 0) {
-            Ok(dref) => dref,
-            Err(e) => return err_result(e),
-        };
-
-        let handle = match ddcutil::open_display(dref) {
-            Ok(handle) => handle,
-            Err(e) => return err_result(e),
-        };
-
-        match ddcutil::get_vcp_metadata(&handle, vcp_code.into()) {
-            Ok(metadata) => (
+        match ddc_operation() {
+            Ok((metadata, status, message)) => (
                 metadata.feature_name,
                 metadata.description,
                 metadata.is_read_only,
@@ -392,10 +350,18 @@ impl DdcCiDbusService {
                 metadata.is_rw,
                 metadata.is_complex,
                 metadata.is_continuous,
-                0,
-                "OK".to_string(),
-            ),
-            Err(e) => err_result(e),
+                status,
+                message,),
+            Err(e) => (
+                "Feature".into(),
+                "Description".into(),
+                false,
+                false,
+                true,
+                false,
+                false,
+                error_code(&e),
+                error_message("GetVcp", &e)),
         }
     }
 
@@ -407,27 +373,20 @@ impl DdcCiDbusService {
         flags: u32,
     ) -> (String, i32, String) {
 
-        let err_result = |e: ddcutil::Error| -> (String, i32, String) {
-            let code: i32 = e.status_code().try_into().unwrap_or(0);
-            (String::new(), code, format!("SetVcp: {}", e))
+        let ddc_operation = || -> Result<(String, i32, String), ddcutil::Error> {
+            let dref = ddcutil::find_display(
+                Option::Some(display_number.into()),
+                Option::Some(edid_txt),
+                flags & EDID_PREFIX_ALLOWED != 0,
+            )?;
+            let handle = ddcutil::open_display(dref)?;
+            let caps_str = ddcutil::get_capabilities_string(&handle)?;
+            Ok((caps_str, 0, "OK".to_string()))
         };
 
-        let dref = match ddcutil::find_display(
-            Option::Some(display_number.into()),
-            Option::Some(edid_txt),
-            flags & EDID_PREFIX_ALLOWED != 0) {
-            Ok(dref) => dref,
-            Err(e) => return err_result(e),
-        };
-
-        let handle = match ddcutil::open_display(dref) {
-            Ok(handle) => handle,
-            Err(e) => return err_result(e),
-        };
-
-        match ddcutil::get_capabilities_string(&handle) {
-            Ok(caps_str) => (caps_str, 0, "OK".to_string(),),
-            Err(e) => err_result(e),
+        match ddc_operation() {
+            Ok((caps_str, status, message)) => (caps_str, status, message),
+            Err(e) => (String::new(), error_code(&e), error_message("GetCapabilitiesString", &e)),
         }
     }
 
@@ -447,42 +406,28 @@ impl DdcCiDbusService {
         String,
     ) {
 
+        let ddc_operation = || -> Result<CapabilitiesData, ddcutil::Error> {
+            let dref = ddcutil::find_display(
+                Option::Some(display_number.into()),
+                Option::Some(edid_txt),
+                flags & EDID_PREFIX_ALLOWED != 0,
+            )?;
+            let handle = ddcutil::open_display(dref)?;
+            let caps_data = ddcutil::get_capabilities_data(handle)?;
+            Ok(caps_data)
+        };
 
-        let err_result = |e: ddcutil::Error| -> (String,
-                                                 u8,
-                                                 u8,
-                                                 HashMap<u8, String>,
-                                                 HashMap<u8, (String, String, HashMap<u8, String>)>,
-                                                 i32,
-                                                 String,) {
-            let code: i32 = e.status_code().try_into().unwrap_or(0);
-            (
+        match ddc_operation() {
+            Ok(caps_data) => Self::convert_capabilities_data(caps_data),
+            Err(e) => (
                 String::new(),
                 0,
                 0,
                 HashMap::new(),
                 HashMap::new(),
-                code,
-                format!("SetVcp: {}", e),
-            )
-        };
-
-        let dref = match ddcutil::find_display(
-            Option::Some(display_number.into()),
-            Option::Some(edid_txt),
-            flags & EDID_PREFIX_ALLOWED != 0) {
-            Ok(dref) => dref,
-            Err(e) => return err_result(e),
-        };
-
-        let handle = match ddcutil::open_display(dref) {
-            Ok(handle) => handle,
-            Err(e) => return err_result(e),
-        };
-
-        match ddcutil::get_capabilities_data(handle) {
-            Ok(cap_data) => Self::convert_capabilities_data(cap_data),
-            Err(e) => err_result(e),
+                error_code(&e),
+                error_message("GetCapabilitiesMetadata", &e),
+            ),
         }
     }
 
@@ -493,13 +438,14 @@ impl DdcCiDbusService {
         edid_txt: &str,
         flags: u32,
     ) -> (i32, String) {
+
         match ddcutil::get_display_state(
             Option::Some(display_number.into()),
             Option::Some(edid_txt),
             flags & EDID_PREFIX_ALLOWED != 0,
         ) {
             Ok((status, text)) => (status, text),
-            Err(e) => (e.status_code().try_into().unwrap_or(0), format!("SetVcp: {}", e)),
+            Err(e) => (error_code(&e), error_message("getDisplayState", &e)),
         }
     }
 
@@ -654,3 +600,12 @@ impl DdcCiDbusService {
     fn set_service_poll_cascade_interval(&mut self, _value: f64) {}
 }
 
+
+fn error_code(e: &ddcutil::Error) -> i32 {
+    let code: i32 = e.status_code().try_into().unwrap_or(0);
+    return code;
+}
+
+fn error_message(prefix: &str, e: &ddcutil::Error) -> String {
+    return format!("{}: {}", prefix, e);
+}

@@ -5,6 +5,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
 # Changelog
 
 ## Unreleased <small>(master)</small>
-- All service methods implemented.
+- Main D-Bus methods implemented.
+- All varlink service methods implemented.
 - Subscription for device change events working.
 
