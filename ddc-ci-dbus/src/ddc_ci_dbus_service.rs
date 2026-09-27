@@ -42,7 +42,7 @@ impl DdcCiDbusService {
     fn list_displays_impl(
         &self,
         flags: u32,
-        force_redetect: bool,
+        detect: bool,
     ) -> (
         i32,
         Vec<(i32, i32, i32, String, String, String, u16, String, u32)>,
@@ -58,12 +58,12 @@ impl DdcCiDbusService {
             ),
             ddcutil::Error> {
 
-            if force_redetect {
+            if detect {
                 ddcutil::redetect()?;
             }
             let list = ddcutil::list_displays(flags & DETECT_ALL != 0)?;
 
-            let result_vector: Vec<_> = list
+            let info_vec: Vec<_> = list
                 .into_iter()
                 .map(|disp| {
                     (
@@ -75,12 +75,16 @@ impl DdcCiDbusService {
                 })
                 .collect();
 
-            Ok((result_vector.len() as i32, result_vector, 0, "OK".to_string()))
+            Ok((info_vec.len() as i32, info_vec, 0, "OK".to_string()))
         };
 
+        let op_name = if detect { "Detect" } else { "ListDetected" };
+
         match ddc_operation() {
-            Ok((number_of_displays, info_vec, status, message)) => (number_of_displays, info_vec, status, message),
-            Err(e) => (0, Vec::new(), error_code(&e), error_message("GetVcp", &e)),
+            Ok((number_of_displays, info_vec, status, message)) => (
+                number_of_displays, info_vec, status, message
+            ),
+            Err(e) => (0, Vec::new(), error_code(&e), error_message(op_name, &e)),
         }
     }
 
