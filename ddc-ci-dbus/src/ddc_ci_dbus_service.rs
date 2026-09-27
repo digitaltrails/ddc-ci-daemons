@@ -49,54 +49,39 @@ impl DdcCiDbusService {
         i32,
         String,
     ) {
-        // Map a ddcutil error into the D-Bus (code, message) pair.
-        let err_result = |e: ddcutil::Error| -> (i32, String) {
-            let code: i32 = e.status_code().try_into().unwrap_or(0);
-            let fn_name: &str = if force_redetect {
-                "detect"
-            } else {
-                "list_displays"
-            };
-            (code, format!("{}: {}", fn_name, e))
+        let ddc_operation = || -> Result<
+            (
+                i32,
+                Vec<(i32, i32, i32, String, String, String, u16, String, u32)>,
+                i32,
+                String,
+            ),
+            ddcutil::Error> {
+
+            if force_redetect {
+                ddcutil::redetect()?;
+            }
+            let list = ddcutil::list_displays(flags & DETECT_ALL != 0)?;
+
+            let result_vector: Vec<_> = list
+                .into_iter()
+                .map(|disp| {
+                    (
+                        disp.display_number, disp.usb_bus, disp.usb_device,
+                        disp.manufacturer_id, disp.model_name, disp.serial_number, disp.product_code,
+                        general_purpose::STANDARD.encode(disp.edid_bytes),
+                        ddcutil::edid_serial_number(&disp.edid_bytes),
+                    )
+                })
+                .collect();
+
+            Ok((result_vector.len() as i32, result_vector, 0, "OK".to_string()))
         };
 
-        // Step 1 (optional): force a redetect.
-        if force_redetect {
-            if let Err(e) = ddcutil::redetect() {
-                let (code, msg) = err_result(e);
-                return (0, Vec::new(), code, msg);
-            }
+        match ddc_operation() {
+            Ok((number_of_displays, info_vec, status, message)) => (number_of_displays, info_vec, status, message),
+            Err(e) => (0, Vec::new(), error_code(&e), error_message("GetVcp", &e)),
         }
-
-        // Step 2: list the detected displays.
-        let all = flags & DETECT_ALL != 0;
-        let list = match ddcutil::list_displays(all) {
-            Ok(list) => list,
-            Err(e) => {
-                let (code, msg) = err_result(e);
-                return (0, Vec::new(), code, msg);
-            }
-        };
-
-        // Step 3: map each varlink display into the D-Bus tuple.
-        let result_vector: Vec<_> = list
-            .into_iter()
-            .map(|disp| {
-                (
-                    disp.display_number,
-                    disp.usb_bus,
-                    disp.usb_device,
-                    disp.manufacturer_id,
-                    disp.model_name,
-                    disp.serial_number,
-                    disp.product_code,
-                    general_purpose::STANDARD.encode(disp.edid_bytes),
-                    ddcutil::edid_serial_number(&disp.edid_bytes),
-                )
-            })
-            .collect();
-
-        (0, result_vector, 0, String::new())
     }
 
     fn convert_capabilities_data(
