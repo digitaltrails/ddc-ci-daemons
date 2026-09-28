@@ -28,7 +28,7 @@ fn get_subscribers() -> &'static SubscriberMutexList {
 }
 
 /// Add a subscriber to the list of subscribers, assign a unique id
-pub fn subscribe_to_intneral_events(event_sender: Sender<InternalEvent>) -> usize {
+pub fn subscribe_to_internal_events(event_sender: Sender<InternalEvent>) -> usize {
     let id = SUBSCRIBER_NEXT_ID.fetch_add(1, Ordering::SeqCst);
     {
         let mut subscribers = get_subscribers().lock().unwrap();

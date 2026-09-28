@@ -7,23 +7,43 @@
 //! different from ddcutil to help with delimiting internal code
 //! boundaries.
 
+use strum::IntoEnumIterator;
 use base64::Engine;
 use base64::engine::general_purpose;
-use ddcutil_backend::ddcutil;
+use ddcutil_backend::{connectivity_polling, ddcutil};
 use std::collections::HashMap;
-use log::{error};
+use std::sync::{Arc, Mutex};
+use std::thread;
+use strum::{EnumIter, Display};
+use num_enum::TryFromPrimitive;
+use log::{debug, error, info};
+use crossbeam_channel::{unbounded, Receiver, Sender};
 use zbus::interface;
 use zbus::object_server::SignalEmitter;
-use ddcutil_backend::ddcutil::{CapabilitiesData, VcpFeatureMetadata};
+use ddcutil_backend::connectivity_polling::ServiceSharedState;
+use ddcutil_backend::ddcutil::{CapabilitiesData, InternalEvent, InternalEventKind, VcpFeatureMetadata};
 
 const DETECT_ALL: u32 = 8;
 const EDID_PREFIX_ALLOWED: u32 = 1;
 const NO_VERIFY: u32 = 4;
 
+
+#[derive(Debug, Clone, Copy, EnumIter, Display)]
+pub enum DdcCiDbusDisplayEventType {
+    DpmsAwake = 0,
+    DpmsAsleep = 1,
+    DisplayConnected = 2,
+    DisplayDisconnected = 3,
+}
+
 /// The main service object. Holds all state and (eventually).
 pub struct DdcCiDbusService {
     pub(crate) dynamic_sleep: bool,
     pub(crate) output_level: u32,
+    /// Single mutex protecting all shared state
+    pub state: Arc<Mutex<ServiceSharedState>>,
+    /// Channel for sending events from the polling thread and native callback.
+    internal_event_sender: Sender<InternalEvent>,
 }
 
 // ── Private helpers (not part of the D-Bus interface) ──────────────
@@ -38,7 +58,32 @@ impl DdcCiDbusService {
 
     /// Object path where the interface is served.
     pub const OBJECT_PATH: &'static str = "/local/ddc_ci/DdcCiObject";
-    
+
+    pub const INTERFACE_NAME: &'static str = "local.ddc_ci.DdcCiInterface";
+
+    pub fn new() -> (Self, Receiver<ddcutil::InternalEvent>) {
+
+        ddcutil::init().expect("ddcutil init failed");  // TODO suspect?
+
+        let (internal_event_sender, internal_event_receiver) = unbounded();
+
+        // Store the sender globally for the native C callback
+        ddcutil::set_internal_event_sender(internal_event_sender.clone()).unwrap();
+
+        // Register the native callback (C callback)
+        if let Err(status) = ddcutil::register_callback(Some(ddcutil::native_ddc_event_callback)) {
+            error!("Failed to register ddcutil event callback: {:?}", status)
+        };
+
+        let service = Self {
+            dynamic_sleep: false,
+            output_level: 0,
+            state: Arc::new(Mutex::new(ServiceSharedState::default())),
+            internal_event_sender: internal_event_sender.clone(),
+        };
+        (service, internal_event_receiver)
+    }
+
     fn list_displays_impl(
         &self,
         flags: u32,
@@ -137,6 +182,44 @@ impl DdcCiDbusService {
             "OK".to_string(),
         )
     }
+
+    // ----- Polling control -----
+
+    /// Start the polling thread if it's not already running.
+    pub fn start_polling(&self) {
+        let mut state = self.state.lock().unwrap();
+        if state.poll_thread.is_some() {
+            debug!("Polling thread already running");
+            return;
+        }
+
+        // Create an unbounded message channel to receive shutdown messages
+        let (shutdown_dispatcher, shutdown_listener) = unbounded();
+
+        let state_arc = self.state.clone();
+        let internal_event_sender = self.internal_event_sender.clone();
+
+        let handle = thread::spawn(move || {
+            connectivity_polling::polling_loop(state_arc, internal_event_sender, shutdown_listener);
+        });
+
+        state.poll_thread = Some(handle);
+        state.shutdown_dispatcher = Some(shutdown_dispatcher);
+        info!("Polling thread started");
+    }
+
+    /// Stop the polling thread if it's running.
+    pub fn stop_polling(&self) {
+        let mut state = self.state.lock().unwrap();
+        if let Some(shutdown_dispatcher) = state.shutdown_dispatcher.take() {
+            let _ = shutdown_dispatcher.send(());
+        }
+        if let Some(handle) = state.poll_thread.take() {
+            let _ = handle.join();
+        }
+        info!("Polling thread stopped");
+    }
+
 }
 
 #[interface(name = "local.ddc_ci.DdcCiInterface")]
@@ -491,7 +574,7 @@ impl DdcCiDbusService {
     // The `&SignalEmitter<'_>` first parameter is mandatory.
 
     #[zbus(signal)]
-    async fn connected_displays_changed(
+    pub async fn connected_displays_changed(
         signal_emitter: &SignalEmitter<'_>,
         edid_txt: &str,
         event_type: i32,
@@ -555,12 +638,12 @@ impl DdcCiDbusService {
 
     #[zbus(property)]
     fn display_event_types(&self) -> HashMap<i32, String> {
-        HashMap::new()
+        DdcCiDbusDisplayEventType::iter().map(|f| (f as i32, f.to_string())).collect()
     }
 
     #[zbus(property)]
     fn service_interface_version(&self) -> &str {
-        "1.0"
+        "1.0.0"
     }
 
     #[zbus(property)]
@@ -577,7 +660,19 @@ impl DdcCiDbusService {
     }
 
     #[zbus(property)]
-    fn set_service_emit_connectivity_signals(&mut self, _value: bool) {}
+    fn set_service_emit_connectivity_signals(&mut self, enable: bool) {
+        if enable {
+            match ddcutil::start_watch_displays() {
+                Ok(()) => debug!("Enabled libddcutil watch_displays."),
+                Err(e) => error!("Failed to enable libddcutil start_watch_displays: {:?}", e),
+            }
+        } else {
+            match ddcutil::start_watch_displays() {
+                Ok(()) => debug!("Disabled libddcutil watch_displays."),
+                Err(e) => error!("Failed to disable libddcutil watch_displays: {:?}", e),
+            }
+        }
+    }
 
     #[zbus(property)]
     fn service_emit_signals(&self) -> bool {

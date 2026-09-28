@@ -36,15 +36,7 @@ impl DdcCiVarlinkService {
     pub fn new() -> (Self, Receiver<ddcutil::InternalEvent>) {
 
         // Initialize libddcutil
-        ddcutil::init().expect("ddcutil init failed");
-
-        if log::log_enabled!(log::Level::Debug) {
-            ddcutil::redetect().expect("initial redetect failed");
-            let display_info = ddcutil::list_displays(false);
-            for display_info in display_info.unwrap() {
-                display_info.log_diagnostics();
-            }
-        }
+        ddcutil::init().expect("ddcutil init failed"); // TODO suspect?
 
         // Create event channel
         let (internal_event_sender, internal_event_receiver) = unbounded();
@@ -69,7 +61,7 @@ impl DdcCiVarlinkService {
     // ----- Subscriptions control -----
 
     pub fn subscribe_to_internal_events(event_sender: Sender<InternalEvent>) -> usize {
-        ddc_ci_varlink_subscribers::subscribe_to_intneral_events(event_sender)
+        ddc_ci_varlink_subscribers::subscribe_to_internal_events(event_sender)
     }
 
     pub fn unsubscribe_from_events(id: usize) {

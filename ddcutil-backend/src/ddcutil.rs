@@ -19,6 +19,7 @@ use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 use std::time::Duration;
+use crate::ddcutil;
 
 macro_rules! ddca_call {
     ($call:expr) => {{
@@ -422,11 +423,19 @@ pub fn get_status_message(status: i32) -> String {
 
 pub fn init() -> Result<()> {
     info!("Initializing ddcutil");
-    ddca_call!(ddca_init(
+    let result = ddca_call!(ddca_init(
         ptr::null(), // no options string
         9,           // LOG_NOTICE
         0
-    ))
+    ));
+    if log::log_enabled!(log::Level::Debug) {
+        redetect().expect("initial redetect failed");
+        let display_info = ddcutil::list_displays(false);
+        for display_info in display_info.unwrap() {
+            display_info.log_diagnostics();
+        }
+    }
+    result
 }
 
 pub fn redetect() -> Result<()> {
@@ -935,7 +944,7 @@ pub extern "C" fn native_ddc_event_callback(native_event: DDCA_Display_Status_Ev
 
     // Send to the channel (if initialized) - If the receiver is gone, just drop the event – no harm.
     if let Some(sender) = INTERNAL_EVENT_SENDER.get() {
-        info!("Sending native-event converted to varlink event: {:?}", internal_event);
+        info!("Sending libddcutil-event converted to internal-event: {:?}", internal_event);
         let _ = sender.send(internal_event);
     }
 }
@@ -1043,4 +1052,11 @@ pub fn build_dpms_event(edid: &String, event_type: InternalEventType) -> Interna
     })
     .to_string();
     InternalEvent { kind: InternalEventKind::ConnectedDisplaysChanged, data }
+}
+
+pub fn extract_edid_base64(internal_event: &InternalEvent) -> String {
+    match serde_json::from_str::<serde_json::Value>(&internal_event.data) {
+        Ok(value) => value["edid_base64"].as_str().unwrap_or("").to_string(),
+        Err(_) => String::new(),
+    }
 }

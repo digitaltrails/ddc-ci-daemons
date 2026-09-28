@@ -11,3 +11,6 @@ zbus = { version = "5", features = ["blocking"] }
 base64 = "0.21.7"
 log = "0.4"
 env_logger = "0.11"
+crossbeam-channel = "0.5.16"
+num_enum = "0.7"
+strum = { version = "0.28", features = ["derive"] }

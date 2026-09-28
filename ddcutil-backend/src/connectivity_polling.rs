@@ -46,10 +46,10 @@ pub struct ServiceSharedState {
 
 impl Default for ServiceSharedState {
     fn default() -> Self {
-        let poll_do_detect = std::env::var("DDCUTIL_POLL_DO_REDETECT")
+        let poll_do_detect = std::env::var("DDC_CI_POLL_DO_REDETECT")
         .map(|val| val.to_lowercase() == "true" || val == "1")
         .unwrap_or(false); // Fallback default if env var is not set
-        info!("Environment variable DDCUTIL_POLL_DO_REDETECT={} (not needed for libddcutil >= 2.2)",
+        info!("Environment variable DDC_CI_POLL_DO_REDETECT={} (not needed for libddcutil >= 2.2)",
               poll_do_detect);
         Self {
             poll_interval_secs: 30,
