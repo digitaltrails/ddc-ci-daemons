@@ -78,12 +78,16 @@ pub fn polling_loop(
     internal_event_sender: Sender<InternalEvent>,
     shutdown_request_receiver: Receiver<()>,
 ) {
-
+    debug!("Starting polling loop");
 
     let mut previous_states: HashMap<String, DisplayState> = HashMap::new();
     let mut initializing = true;
 
     loop {
+        if initializing {
+            debug!("polling_loop: Polling loop top initilizing");
+        }
+        
         // Check for shutdown signal
         if shutdown_request_receiver.try_recv().is_ok() {
             info!("Polling thread received shutdown signal, stopping polling thread.");
@@ -110,7 +114,8 @@ pub fn polling_loop(
         if !events_enabled {
             drop(guard);
             ddcutil::sleep_interruptible(Duration::from_secs(5));
-            continue;
+            debug!("polling_loop: Polling event enabled={}", events_enabled);
+            continue;  // TODO - should we not exit now - or might events be re-enabled?
         }
 
         // ---- Call libddcutil (safe because we hold the lock) ----
@@ -203,7 +208,7 @@ pub fn polling_loop(
             }
         }
 
-    previous_states = current_states;
+        previous_states = current_states;
         initializing = false;
 
         // Sleep without holding the lock

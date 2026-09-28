@@ -33,7 +33,7 @@ impl DdcCiVarlinkService {
     pub const PRODUCT_URL: &'static str = "https://github.com/digitaltrails/ddc-ci-daemons";
     pub const FALLBACK_SOCKET_FILENAME: &'static str = "ddc-ci-varlink.socket";
 
-    pub fn new() -> (Self, Receiver<ddcutil::InternalEvent>) {
+    pub fn new() -> Self {
 
         // Initialize libddcutil
         ddcutil::init().expect("ddcutil init failed"); // TODO suspect?
@@ -55,7 +55,16 @@ impl DdcCiVarlinkService {
             configuration_locked: Arc::new(AtomicBool::new(false)),
         };
 
-        (service, internal_event_receiver)
+        // InternalEvents are forwarded to the subscribers module which converts 
+        // them to external varlink events and dispatches them to
+        // external subscribers.
+        std::thread::spawn(move || {
+            info!("Started thread to broadcast internal events to subscribers.");
+            // This will loop reading events and forwarding to varlink subscribers
+            ddc_ci_varlink_subscribers::forward_to_all_subscribers(internal_event_receiver);
+        });
+
+        service
     }
 
     // ----- Subscriptions control -----

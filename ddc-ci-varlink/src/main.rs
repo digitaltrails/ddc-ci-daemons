@@ -62,17 +62,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     );
 
     // Create our implementation of the service.
-    // Obtain the internal_event_receiver. Events are forwarded internally to the subscribers
-    // module which converts them to external varlink events and dispatches them to
-    // external subscribers.
-    let (service_implementation,
-        internal_event_receiver) = DdcCiVarlinkService::new();
-
-    // Spawn thread to forward ddcutil events to Varlink subscribers
-    std::thread::spawn(move || {
-        // This will loop reading events and forwarding to varlink subscribers
-        ddc_ci_varlink_subscribers::forward_to_all_subscribers(internal_event_receiver);
-    });
+    let service_implementation= DdcCiVarlinkService::new();
 
     // Build the Varlink interface
     let interface = local_ddc_ci_service::new(Box::new(service_implementation));
