@@ -871,8 +871,7 @@ pub fn get_status_values() -> HashMap<i32, String> {
             let c_str_ptr = ddcutil::ddca_rc_name(neg_i);
             let name_str = CStr::from_ptr(c_str_ptr)
                 .to_string_lossy()
-                .into_owned(); // Converts to an owned String
-
+                .into_owned(); 
             rc_map.insert(neg_i, name_str);
         }
         i += 1;
