@@ -6,6 +6,7 @@
 //! This module wraps the underlying unsafe C API provided by `libddcutil` to
 //! manage monitor settings using native Rust types and proper ownership rules.
 
+use std::collections::HashMap;
 use crate::ffi_wrapper::*;
 use base64::{engine::general_purpose, Engine as _};
 use crossbeam_channel::Sender;
@@ -20,6 +21,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 use std::time::Duration;
 use crate::ddcutil;
+
+const RCRANGE_DDC_START: i32 = 3000;
 
 macro_rules! ddca_call {
     ($call:expr) => {{
@@ -856,6 +859,20 @@ pub fn get_capabilities_data(handle: DisplayHandle) -> Result<CapabilitiesData> 
         commands,
         features: supported_features_vec,
     })
+}
+
+pub fn get_status_values() -> HashMap<i32, String> {
+    let start_idx = RCRANGE_DDC_START + 1;
+    let rc_map: HashMap<i32, String> = (start_idx..)
+        .map(|i| -i)
+        .map(|neg_i| unsafe { (neg_i, ddcutil::ddca_rc_name(neg_i)) })
+        .take_while(|(_, ptr)| !ptr.is_null())
+        .map(|(neg_i, ptr)| unsafe {
+            let name = CStr::from_ptr(ptr).to_string_lossy().into_owned();
+            (neg_i, name)
+        })
+        .collect();
+    rc_map
 }
 
 static NEED_POLL: AtomicBool = AtomicBool::new(false);

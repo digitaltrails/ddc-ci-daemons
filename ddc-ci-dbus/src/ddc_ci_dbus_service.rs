@@ -7,24 +7,23 @@
 //! different from ddcutil to help with delimiting internal code
 //! boundaries.
 
-use strum::IntoEnumIterator;
 use base64::Engine;
 use base64::engine::general_purpose;
+use crossbeam_channel::{Receiver, Sender, unbounded};
+use ddcutil_backend::connectivity_polling::ServiceSharedState;
+use ddcutil_backend::ddcutil::{CapabilitiesData, InternalEvent, VcpFeatureMetadata, extract_edid_base64, start_watch_displays};
 use ddcutil_backend::{connectivity_polling, ddcutil};
+use log::{debug, error, info, LevelFilter};
 use std::collections::HashMap;
 use std::error::Error;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
-use strum::{EnumIter, Display};
-use num_enum::TryFromPrimitive;
-use log::{debug, error, info};
-use crossbeam_channel::{unbounded, Receiver, Sender};
-use zbus::blocking::{connection, Connection};
+use strum::IntoEnumIterator;
+use strum::{Display, EnumIter};
+use zbus::blocking::{Connection, connection};
+use zbus::fdo::{Error as FdoError};
 use zbus::interface;
 use zbus::object_server::SignalEmitter;
-use ddcutil_backend::connectivity_polling::ServiceSharedState;
-use ddcutil_backend::ddcutil::{start_watch_displays, CapabilitiesData, InternalEvent, InternalEventKind, VcpFeatureMetadata, extract_edid_base64};
-use crate::is_env_enabled;
 
 const DETECT_ALL: u32 = 8;
 const EDID_PREFIX_ALLOWED: u32 = 1;
@@ -41,8 +40,8 @@ pub enum DdcCiDbusDisplayEventType {
 
 /// The main service object. Holds all state and (eventually).
 pub struct DdcCiDbusService {
-    pub(crate) dynamic_sleep: bool,
-    pub(crate) output_level: u32,
+    pub(crate) parameters_locked: bool,
+    pub(crate) connectivity_signals_enabled: bool,
     /// Single mutex protecting all shared state
     pub state: Arc<Mutex<ServiceSharedState>>,
     /// Channel for sending events from the polling thread and native callback.
@@ -69,7 +68,9 @@ impl DdcCiDbusService {
     /// Object path where the interface is served.
     pub const OBJECT_PATH: &'static str = "/local/ddc_ci/DdcCiObject";
 
-    pub const INTERFACE_NAME: &'static str = "local.ddc_ci.DdcCiInterface";
+    pub const DETECT_ATTRIBUTES: &[&str] = &["display_number", "usb_bus", "usb_device",
+        "manufacturer_id", "model_name", "serial_number", "product_code",
+        "edid_txt", "binary_serial_number",];
 
     pub fn new() -> (Self, Receiver<ddcutil::InternalEvent>) {
 
@@ -86,8 +87,8 @@ impl DdcCiDbusService {
         };
 
         let service = Self {
-            dynamic_sleep: false,
-            output_level: 0,
+            parameters_locked: is_env_enabled("DDC_CI_PARAMETERS_LOCKED", false),
+            connectivity_signals_enabled: is_env_enabled("DDC_CI_CONNECTIVITY_SIGNALS", true),
             state: Arc::new(Mutex::new(ServiceSharedState::default())),
             internal_event_sender: internal_event_sender.clone(),
         };
@@ -255,7 +256,9 @@ impl DdcCiDbusService {
 
 }
 
-#[interface(name = "local.ddc_ci.DdcCiInterface")]
+const DDC_CI_DBUS_SERVICE_VERSION: &'static str = "1.0.0";
+
+#[interface(name = "local.ddc_ci.DdcCiInterface", spawn = false)]
 impl DdcCiDbusService {
     // ── Methods ────────────────────────────────────────────────────────
 
@@ -636,37 +639,43 @@ impl DdcCiDbusService {
 
     #[zbus(property)]
     fn attributes_returned_by_detect(&self) -> Vec<String> {
-        vec![]
+        Self::DETECT_ATTRIBUTES.iter().map(|s| s.to_string()).collect()
     }
 
     #[zbus(property)]
     fn status_values(&self) -> HashMap<i32, String> {
-        HashMap::new()
+        ddcutil::get_status_values()
     }
 
     #[zbus(property)]
     fn ddcutil_version(&self) -> &str {
-        "0.0.0"
+        static VERSION_CACHE: OnceLock<String> = OnceLock::new();
+        VERSION_CACHE.get_or_init(|| {
+            ddcutil::get_ddcutil_version()
+        }) }
+
+    #[zbus(property)]
+    fn ddcutil_dynamic_sleep(&self) -> bool { ddcutil::is_dynamic_sleep_enabled() }
+
+    #[zbus(property)]
+    fn set_ddcutil_dynamic_sleep(&mut self, value: bool) -> Result<(), FdoError> {
+        if self.parameters_locked {
+            return Err(FdoError::AccessDenied("configuration locked".to_string()));
+        }
+        ddcutil::enable_dynamic_sleep(value);
+        Ok(())
     }
 
     #[zbus(property)]
-    fn ddcutil_dynamic_sleep(&self) -> bool {
-        self.dynamic_sleep
-    }
+    fn ddcutil_output_level(&self) -> u32 { ddcutil::get_output_level() }
 
     #[zbus(property)]
-    fn set_ddcutil_dynamic_sleep(&mut self, value: bool) {
-        self.dynamic_sleep = value;
-    }
-
-    #[zbus(property)]
-    fn ddcutil_output_level(&self) -> u32 {
-        self.output_level
-    }
-
-    #[zbus(property)]
-    fn set_ddcutil_output_level(&mut self, value: u32) {
-        self.output_level = value;
+    fn set_ddcutil_output_level(&mut self, value: u32) -> Result<(), FdoError> {
+        if self.parameters_locked {
+            return Err(FdoError::AccessDenied("configuration locked".to_string()));
+        }
+        ddcutil::set_output_level(value);
+        Ok(())
     }
 
     #[zbus(property)]
@@ -676,24 +685,34 @@ impl DdcCiDbusService {
 
     #[zbus(property)]
     fn service_interface_version(&self) -> &str {
-        "1.0.0"
+        DDC_CI_DBUS_SERVICE_VERSION
     }
 
     #[zbus(property)]
     fn service_info_logging(&self) -> bool {
-        false
+        log::max_level() == log::Level::Debug  // Matches C-coded ddcutil-service
     }
 
     #[zbus(property)]
-    fn set_service_info_logging(&mut self, _value: bool) {}
+    fn set_service_info_logging(&mut self, _value: bool) -> Result<(), FdoError> {
+        if self.parameters_locked {
+            return Err(FdoError::AccessDenied("configuration locked".to_string()));
+        }
+        log::set_max_level(LevelFilter::Debug);
+        Ok(())
+    }
 
     #[zbus(property)]
     fn service_emit_connectivity_signals(&self) -> bool {
-        false
+        self.connectivity_signals_enabled
     }
 
     #[zbus(property)]
-    fn set_service_emit_connectivity_signals(&mut self, enable: bool) {
+    fn set_service_emit_connectivity_signals(&mut self, enable: bool) -> Result<(), FdoError> {
+        if self.parameters_locked {
+            return Err(FdoError::AccessDenied("configuration locked".to_string()));
+        }
+        self.connectivity_signals_enabled = enable;
         if enable {
             match ddcutil::start_watch_displays() {
                 Ok(()) => debug!("Enabled libddcutil watch_displays."),
@@ -705,15 +724,8 @@ impl DdcCiDbusService {
                 Err(e) => error!("Failed to disable libddcutil watch_displays: {:?}", e),
             }
         }
+        Ok(())
     }
-
-    #[zbus(property)]
-    fn service_emit_signals(&self) -> bool {
-        false
-    }
-
-    #[zbus(property)]
-    fn set_service_emit_signals(&mut self, _value: bool) {}
 
     #[zbus(property)]
     fn service_flag_options(&self) -> HashMap<i32, String> {
@@ -721,25 +733,47 @@ impl DdcCiDbusService {
     }
 
     #[zbus(property)]
-    fn service_parameters_locked(&self) -> bool {
-        false
-    }
+    fn service_parameters_locked(&self) -> bool { self.parameters_locked }
 
     #[zbus(property)]
     fn service_poll_interval(&self) -> u32 {
-        0
+        let state = self.state.lock().unwrap();
+        state.poll_interval_secs
     }
 
     #[zbus(property)]
-    fn set_service_poll_interval(&mut self, _value: u32) {}
+    fn set_service_poll_interval(&mut self, seconds: u32) -> Result<(), FdoError> {
+        if self.parameters_locked {
+            return Err(FdoError::AccessDenied("configuration locked".to_string()));
+        }
+        if seconds > 0 && seconds < 10 {
+            return Err(FdoError::InvalidArgs("poll interval too small".to_string()));
+        }
+        let mut state = self.state.lock().unwrap();
+        state.poll_interval_secs = seconds;
+        if seconds == 0 {
+            self.stop_polling()
+        }
+        Ok(())
+    }
 
     #[zbus(property)]
     fn service_poll_cascade_interval(&self) -> f64 {
-        0.0
+        let state = self.state.lock().unwrap();
+        state.poll_cascade_secs
     }
 
     #[zbus(property)]
-    fn set_service_poll_cascade_interval(&mut self, _value: f64) {}
+    fn set_service_poll_cascade_interval(&mut self, seconds: f64) -> Result<(), FdoError>{
+        if self.parameters_locked {
+            return Err(FdoError::AccessDenied("configuration locked".to_string()));
+        }
+        if seconds < 0.0 || (seconds > 0.0 && seconds < 1.0) {
+            return Err(FdoError::InvalidArgs("poll cascade interval too small".to_string()));
+        }
+        let mut state = self.state.lock().unwrap();
+        state.poll_cascade_secs = seconds;
+        Ok(())}
 }
 
 pub fn forward_events_as_signals(internal_event_receiver: Receiver<InternalEvent>, connection: Connection) -> Result<(), Box<dyn Error>> {
@@ -775,7 +809,13 @@ pub fn forward_events_as_signals(internal_event_receiver: Receiver<InternalEvent
     Ok(())
 }
 
-
+pub fn is_env_enabled(env_variable_name: &str, default_value: bool) -> bool {
+    let value = std::env::var(env_variable_name)
+        .map(|v| ["yes", "1", "true", "on"].iter().any(|s| v.eq_ignore_ascii_case(s)))
+        .unwrap_or(default_value);
+    info!("Environment variable: {}={} (default={})", env_variable_name, value, default_value);
+    value
+}
 
 fn error_code(e: &ddcutil::Error) -> i32 {
     let code: i32 = e.status_code().try_into().unwrap_or(0);

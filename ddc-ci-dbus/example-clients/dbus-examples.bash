@@ -12,3 +12,5 @@ busctl --user call $DBUS_BUS_NAME $DBUS_OBJECT $DBUS_INTERFACE_NAME GetVcpMetada
 busctl --user call $DBUS_BUS_NAME $DBUS_OBJECT $DBUS_INTERFACE_NAME GetCapabilitiesString isu 1 ""  0
 busctl --user call $DBUS_BUS_NAME $DBUS_OBJECT $DBUS_INTERFACE_NAME GetCapabilitiesMetadata isu 1 ""  0
 busctl --user call $DBUS_BUS_NAME $DBUS_OBJECT $DBUS_INTERFACE_NAME GetDisplayState isu 1 ""  0
+busctl --user call $DBUS_BUS_NAME $DBUS_OBJECT org.freedesktop.DBus.Properties Get ss "$DBUS_INTERFACE_NAME" StatusValues
+busctl --user call $DBUS_BUS_NAME $DBUS_OBJECT org.freedesktop.DBus.Properties Set ssv "$DBUS_INTERFACE_NAME" ServiceEmitConnectivitySignals b 1
