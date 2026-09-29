@@ -22,6 +22,7 @@ use std::sync::OnceLock;
 use std::time::Duration;
 use crate::ddcutil;
 
+// TODO: Could not find this - manually define for now
 const RCRANGE_DDC_START: i32 = 3000;
 
 macro_rules! ddca_call {
@@ -862,16 +863,20 @@ pub fn get_capabilities_data(handle: DisplayHandle) -> Result<CapabilitiesData> 
 }
 
 pub fn get_status_values() -> HashMap<i32, String> {
-    let start_idx = RCRANGE_DDC_START + 1;
-    let rc_map: HashMap<i32, String> = (start_idx..)
-        .map(|i| -i)
-        .map(|neg_i| unsafe { (neg_i, ddcutil::ddca_rc_name(neg_i)) })
-        .take_while(|(_, ptr)| !ptr.is_null())
-        .map(|(neg_i, ptr)| unsafe {
-            let name = CStr::from_ptr(ptr).to_string_lossy().into_owned();
-            (neg_i, name)
-        })
-        .collect();
+    let mut rc_map: HashMap<i32, String> = HashMap::new();
+    let mut i = RCRANGE_DDC_START + 1;
+    while unsafe { !ddcutil::ddca_rc_name(-i).is_null() } {
+        let neg_i = -i;
+        unsafe {
+            let c_str_ptr = ddcutil::ddca_rc_name(neg_i);
+            let name_str = CStr::from_ptr(c_str_ptr)
+                .to_string_lossy()
+                .into_owned(); // Converts to an owned String
+
+            rc_map.insert(neg_i, name_str);
+        }
+        i += 1;
+    }
     rc_map
 }
 
