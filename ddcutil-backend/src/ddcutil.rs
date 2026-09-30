@@ -939,11 +939,12 @@ pub fn register_callback(
 ) -> Result<()> {
     let status = unsafe { ddca_register_display_status_callback(callback) };
     if status == 0 {
+        info!("Registered native display status callback");
         Ok(())
     } else {
         Err(Error::FailedRegisterCallback {
             message: format!(
-                "Failed to register callback: {}",
+                "Failed to register native display callback: {}",
                 get_status_message(status)
             ),
         })
@@ -959,14 +960,17 @@ pub fn set_internal_event_sender(sender: Sender<InternalEvent>) -> Result<()> {
 
 /// Event c Callback for passing to libddcutil
 pub extern "C" fn native_ddc_event_callback(native_event: DDCA_Display_Status_Event) {
-    debug!("my_display_callback event {}", native_event.event_type);
+    info!("native_ddc_event_callback: libddcutil-event {}", native_event.event_type);
 
     let internal_event = build_event_from_ddca_event(native_event);  // side effect sets NEED_POLL
 
     // Send to the channel (if initialized) - If the receiver is gone, just drop the event – no harm.
     if let Some(sender) = INTERNAL_EVENT_SENDER.get() {
-        info!("Sending libddcutil-event converted to internal-event: {:?}", internal_event);
+        info!("native_ddc_event_callback: sending libddcutil-event converted to internal-event: {:?}", internal_event);
         let _ = sender.send(internal_event);
+    }
+    else {
+        error!("native_ddc_event_callback: cannot handle libddcutil-event: internal event sender not set.");
     }
 }
 
