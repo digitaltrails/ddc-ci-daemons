@@ -810,25 +810,25 @@ pub fn forward_events_as_signals(internal_event_receiver: Receiver<InternalEvent
 }
 
 pub fn is_env_enabled(env_variable_name: &str, default_value: bool) -> bool {
-    let value = match std::env::var(env_variable_name) {
-        Ok(v) => {
-            let v = v.trim().to_lowercase();
-            info!("Environment variable: {}={}", env_variable_name, v);
-            if ["yes", "1", "true", "on"].contains(&v.as_str()) {
-                true
-            } else if ["no", "0", "false", "off"].contains(&v.as_str()) {
-                false
-            } else {
-                info!("Environment variable: {} failed to interpret value, default={}", env_variable_name, default_value);
-                default_value
-            }
-        }
-        Err(_) => {
-            info!("Environment variable: {} using default={}", env_variable_name, default_value);
-            default_value
-        },
+    let Ok(raw) = std::env::var(env_variable_name) else {
+        info!("Environment variable: {} using default={}", env_variable_name, default_value);
+        return default_value;
     };
-    value
+
+    let value = raw.trim().to_lowercase();
+    info!("Environment variable: {}={}", env_variable_name, value);
+
+    match value.as_str() {
+        "yes" | "1" | "true" | "on" => true,
+        "no" | "0" | "false" | "off" => false,
+        _ => {
+            info!(
+                "Environment variable: {} failed to interpret value, default={}",
+                env_variable_name, default_value
+            );
+            default_value
+        }
+    }
 }
 
 fn error_code(e: &ddcutil::Error) -> i32 {
