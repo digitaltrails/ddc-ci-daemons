@@ -12,8 +12,8 @@ use base64::engine::general_purpose;
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use ddcutil_backend::connectivity_polling::ServiceSharedState;
 use ddcutil_backend::ddcutil::{CapabilitiesData, InternalEvent, VcpFeatureMetadata, extract_edid_base64, start_watch_displays};
-use ddcutil_backend::{connectivity_polling, ddcutil};
-use log::{debug, error, info, LevelFilter};
+use ddcutil_backend::{connectivity_polling, ddcutil, is_env_enabled};
+use log::{LevelFilter, debug, error, info};
 use std::collections::HashMap;
 use std::error::Error;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -21,14 +21,19 @@ use std::thread;
 use strum::IntoEnumIterator;
 use strum::{Display, EnumIter};
 use zbus::blocking::{Connection, connection};
-use zbus::fdo::{Error as FdoError};
+use zbus::fdo::Error as FdoError;
 use zbus::interface;
 use zbus::object_server::SignalEmitter;
 
-const DETECT_ALL: u32 = 8;
-const EDID_PREFIX_ALLOWED: u32 = 1;
-const NO_VERIFY: u32 = 4;
-
+#[derive(Debug, Clone, Copy, EnumIter, Display)]
+#[repr(u32)]
+pub enum ServiceFlags {
+    EdidPrefixAllowed = 1,
+    /// Deprecated - use environment variable DDC_CI_RETURN_RAW_VALUES.
+    ReturnRawValues = 2,
+    NoVerify = 4,
+    DetectAll = 8,
+}
 
 #[derive(Debug, Clone, Copy, EnumIter, Display)]
 pub enum DdcCiDbusDisplayEventType {
@@ -46,6 +51,9 @@ pub struct DdcCiDbusService {
     pub state: Arc<Mutex<ServiceSharedState>>,
     /// Channel for sending events from the polling thread and native callback.
     internal_event_sender: Sender<InternalEvent>,
+    /// Callers can elect to drop the high byte of simple non-continuous types.
+    /// For simple non-continuous types the high byte may be garbage for some models of VDU.
+    pub raw_values: bool,
 }
 
 impl DdcCiDbusService {
@@ -91,6 +99,7 @@ impl DdcCiDbusService {
             connectivity_signals_enabled: is_env_enabled("DDC_CI_CONNECTIVITY_SIGNALS", true),
             state: Arc::new(Mutex::new(ServiceSharedState::default())),
             internal_event_sender: internal_event_sender.clone(),
+            raw_values: is_env_enabled("DDC_CI_SIMPLE_RAW_VALUES", true),
         };
 
         (service, internal_event_receiver)
@@ -140,7 +149,7 @@ impl DdcCiDbusService {
             if detect {
                 ddcutil::redetect()?;
             }
-            let list = ddcutil::list_displays(flags & DETECT_ALL != 0)?;
+            let list = ddcutil::list_displays(flags & ServiceFlags::DetectAll as u32 != 0)?;
 
             let info_vec: Vec<_> = list
                 .into_iter()
@@ -316,10 +325,11 @@ impl DdcCiDbusService {
             let dref = ddcutil::find_display(
                 Option::Some(display_number.into()),
                 Option::Some(edid_txt),
-                flags & EDID_PREFIX_ALLOWED != 0,
+                flags & ServiceFlags::EdidPrefixAllowed as u32 as u32 != 0,
             )?;
             let handle = ddcutil::open_display(dref)?;
-            let (current, max, formatted) = ddcutil::get_vcp(&handle, vcp_code)?;
+            let want_raw_values = self.raw_values || flags & ServiceFlags::ReturnRawValues as u32 as u32 != 0;
+            let (current, max, formatted) = ddcutil::get_vcp(&handle, vcp_code, want_raw_values)?;
             Ok((current as u16, max as u16, formatted, 0, "OK".to_string()))
         };
 
@@ -342,12 +352,13 @@ impl DdcCiDbusService {
             let dref = ddcutil::find_display(
                 Option::Some(display_number.into()),
                 Option::Some(edid_txt),
-                flags & EDID_PREFIX_ALLOWED != 0,
+                flags & ServiceFlags::EdidPrefixAllowed as u32 != 0,
             )?;
+            let want_raw_values = self.raw_values || flags & ServiceFlags::ReturnRawValues as u32 as u32 != 0;
             let handle = ddcutil::open_display(dref)?;
             let mut values = Vec::new();
             for &code in vcp_codes {
-                let (current, max, formatted) = ddcutil::get_vcp(&handle, code as u8)?;
+                let (current, max, formatted) = ddcutil::get_vcp(&handle, code as u8, want_raw_values)?;
                 values.push((code, current as u16, max as u16, formatted));
             }
             Ok((values, 0, "OK".to_string()))
@@ -401,10 +412,10 @@ impl DdcCiDbusService {
             let dref = ddcutil::find_display(
                 Option::Some(display_number.into()),
                 Option::Some(edid_txt),
-                flags & EDID_PREFIX_ALLOWED != 0,
+                flags & ServiceFlags::EdidPrefixAllowed as u32 != 0,
             )?;
             let handle = ddcutil::open_display(dref)?;
-            ddcutil::set_vcp(&handle, vcp_code as u8, vcp_new_value, flags & NO_VERIFY != 0)?;
+            ddcutil::set_vcp(&handle, vcp_code as u8, vcp_new_value, flags & ServiceFlags::NoVerify as u32 != 0)?;
 
             let sender_str: String = hdr.sender()
                 .map(|name| name.to_string())
@@ -442,7 +453,7 @@ impl DdcCiDbusService {
             let dref = ddcutil::find_display(
                 Option::Some(display_number.into()),
                 Option::Some(edid_txt),
-                flags & EDID_PREFIX_ALLOWED != 0,
+                flags & ServiceFlags::EdidPrefixAllowed as u32 != 0,
             )?;
             let handle = ddcutil::open_display(dref)?;
             let metadata = ddcutil::get_vcp_metadata(&handle, vcp_code.into())?;
@@ -485,7 +496,7 @@ impl DdcCiDbusService {
             let dref = ddcutil::find_display(
                 Option::Some(display_number.into()),
                 Option::Some(edid_txt),
-                flags & EDID_PREFIX_ALLOWED != 0,
+                flags & ServiceFlags::EdidPrefixAllowed as u32 != 0,
             )?;
             let handle = ddcutil::open_display(dref)?;
             let caps_str = ddcutil::get_capabilities_string(&handle)?;
@@ -518,7 +529,7 @@ impl DdcCiDbusService {
             let dref = ddcutil::find_display(
                 Option::Some(display_number.into()),
                 Option::Some(edid_txt),
-                flags & EDID_PREFIX_ALLOWED != 0,
+                flags & ServiceFlags::EdidPrefixAllowed as u32 != 0,
             )?;
             let handle = ddcutil::open_display(dref)?;
             let caps_data = ddcutil::get_capabilities_data(handle)?;
@@ -550,7 +561,7 @@ impl DdcCiDbusService {
         match ddcutil::get_display_state(
             Option::Some(display_number.into()),
             Option::Some(edid_txt),
-            flags & EDID_PREFIX_ALLOWED != 0,
+            flags & ServiceFlags::EdidPrefixAllowed as u32 != 0,
         ) {
             Ok((status, text)) => (status, text),
             Err(e) => (error_code(&e), error_message("getDisplayState", &e)),
@@ -569,7 +580,7 @@ impl DdcCiDbusService {
             let dref = ddcutil::find_display(
                 Option::Some(display_number.into()),
                 Option::Some(edid_txt),
-                flags & EDID_PREFIX_ALLOWED != 0,
+                flags & ServiceFlags::EdidPrefixAllowed as u32 != 0,
             )?;
             let multiplier = ddcutil::get_sleep_multiplier(dref)?;
             Ok((multiplier, 0, "OK".to_string()))
@@ -593,7 +604,7 @@ impl DdcCiDbusService {
             let dref = ddcutil::find_display(
                 Option::Some(display_number.into()),
                 Option::Some(edid_txt),
-                flags & EDID_PREFIX_ALLOWED != 0,
+                flags & ServiceFlags::EdidPrefixAllowed as u32 != 0,
             )?;
             ddcutil::set_sleep_multiplier(dref, new_multiplier)?;
             Ok((0, "OK".to_string()))
@@ -729,7 +740,7 @@ impl DdcCiDbusService {
 
     #[zbus(property)]
     fn service_flag_options(&self) -> HashMap<i32, String> {
-        HashMap::new()
+        ServiceFlags::iter().map(|f| (f as i32, f.to_string())).collect()
     }
 
     #[zbus(property)]
@@ -807,28 +818,6 @@ pub fn forward_events_as_signals(internal_event_receiver: Receiver<InternalEvent
         }
     }
     Ok(())
-}
-
-pub fn is_env_enabled(env_variable_name: &str, default_value: bool) -> bool {
-    let Ok(raw) = std::env::var(env_variable_name) else {
-        info!("Environment variable: {} using default={}", env_variable_name, default_value);
-        return default_value;
-    };
-
-    let value = raw.trim().to_lowercase();
-    info!("Environment variable: {}={}", env_variable_name, value);
-
-    match value.as_str() {
-        "yes" | "1" | "true" | "on" => true,
-        "no" | "0" | "false" | "off" => false,
-        _ => {
-            info!(
-                "Environment variable: {} failed to interpret value, default={}",
-                env_variable_name, default_value
-            );
-            default_value
-        }
-    }
 }
 
 fn error_code(e: &ddcutil::Error) -> i32 {

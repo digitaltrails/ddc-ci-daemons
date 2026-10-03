@@ -4,7 +4,7 @@
 //! DdcCiVarlinkService – service implementation
 
 use ddcutil_backend::ddcutil::{InternalEvent};
-use ddcutil_backend::{ddcutil, connectivity_polling};
+use ddcutil_backend::{ddcutil, connectivity_polling, is_env_enabled};
 use crate::ddc_ci_varlink_subscribers;
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use log::{debug, error, info};
@@ -20,6 +20,7 @@ pub struct DdcCiVarlinkService {
     internal_event_sender: Sender<ddcutil::InternalEvent>,
     /// If true, configuration‑changing methods are rejected.
     pub configuration_locked: Arc<AtomicBool>,
+    pub raw_values: bool,
 }
 
 impl DdcCiVarlinkService {
@@ -53,6 +54,7 @@ impl DdcCiVarlinkService {
             state: Arc::new(Mutex::new(ServiceSharedState::default())),
             internal_event_sender,
             configuration_locked: Arc::new(AtomicBool::new(false)),
+            raw_values: is_env_enabled("DDC_CI_SIMPLE_RAW_VALUES", true)
         };
 
         // InternalEvents are forwarded to the subscribers module which converts 

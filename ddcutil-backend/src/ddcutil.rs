@@ -553,7 +553,7 @@ unsafe fn free_c_string(ptr: *mut libc::c_char) {
     }
 }
 
-pub fn get_vcp(handle: &DisplayHandle, vcp_code: u8) -> Result<(u16, u16, String)> {
+pub fn get_vcp(handle: &DisplayHandle, vcp_code: u8, raw: bool) -> Result<(u16, u16, String)> {
     let mut valrec = DDCA_Non_Table_Vcp_Value {
         mh: 0,
         ml: 0,
@@ -567,9 +567,28 @@ pub fn get_vcp(handle: &DisplayHandle, vcp_code: u8) -> Result<(u16, u16, String
         &mut valrec
     ))?;
 
+    let mut md_ptr: *mut DDCA_Feature_Metadata = ptr::null_mut();
+    let raw_handle = handle.ddca_handle;
+
+    ddca_call!(ddca_get_feature_metadata_by_dh(
+        vcp_code as DDCA_Vcp_Feature_Code,
+        raw_handle,
+        true,
+        &mut md_ptr
+    ))?;
+    let feature_flags = (unsafe { *md_ptr }).feature_flags as u32;
+    let is_simple: bool = DDCA_SIMPLE_NC & feature_flags != 0;
+
+    // Callers can elect to drop the high byte of simple non-continuous types.
+    // For simple non-continuous types the high byte may be garbage for some models of VDU.
+    let low_byte_only = is_simple && !raw;
+
+    unsafe { ddca_free_feature_metadata(md_ptr); }
+
+
     // For simplicity, we just return raw 16-bit and formatted empty
-    let current = (valrec.sh as u16) << 8 | valrec.sl as u16;
-    let max = (valrec.mh as u16) << 8 | valrec.ml as u16;
+    let current = if low_byte_only { valrec.sl as u16 } else { (valrec.sh as u16) << 8 | valrec.sl as u16 };
+    let max = if low_byte_only { valrec.ml as u16 } else { (valrec.mh as u16) << 8 | valrec.ml as u16};
     let mut formatted = ptr::null_mut();
 
     // Format the value
@@ -906,7 +925,7 @@ pub fn sleep_interruptible(duration: Duration) -> bool {
 pub fn is_dpms_awake(dref: DisplayRef) -> Result<bool> {
     let dmps_vp_code = 0xd6u8;
     let handle = open_display(dref)?;
-    let (current, _, _) = get_vcp(&handle, dmps_vp_code)?;
+    let (current, _, _) = get_vcp(&handle, dmps_vp_code, false)?;
     Ok(current != 0)
 }
 

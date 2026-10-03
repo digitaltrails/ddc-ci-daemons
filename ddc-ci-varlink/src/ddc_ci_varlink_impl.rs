@@ -180,7 +180,7 @@ impl VarlinkInterface for DdcCiVarlinkService {
 
         let mut values = Vec::new();
         for &code in &vcp_codes {
-            match ddcutil::get_vcp(&handle, code as u8) {
+            match ddcutil::get_vcp(&handle, code as u8, self.raw_values) {
                 Ok((current, max, formatted)) => {
                     values.push(VcpValue {
                         vcp_code: code,
@@ -267,7 +267,7 @@ impl VarlinkInterface for DdcCiVarlinkService {
                 is_edid_prefix_allowed(&options),
             )?;
             let handle = ddcutil::open_display(dref)?;
-            let (current, max, formatted) = ddcutil::get_vcp(&handle, vcp_code as u8)?;
+            let (current, max, formatted) = ddcutil::get_vcp(&handle, vcp_code as u8, self.raw_values)?;
             Ok((current as u32, max as u32, formatted))
         };
 
