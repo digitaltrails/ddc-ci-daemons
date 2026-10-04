@@ -3,6 +3,7 @@
 DBUS_SERVICE_NAME=local.ddc-ci.DdcCiService
 DBUS_OBJECT=/local/ddc_ci/DdcCiObject
 DBUS_INTERFACE_NAME=local.ddc_ci.DdcCiInterface
+DBUS_PROP_INTERFACE_NAME=org.freedesktop.DBus.Properties
 busctl --user call $DBUS_SERVICE_NAME $DBUS_OBJECT $DBUS_INTERFACE_NAME Detect u 0
 busctl --user call $DBUS_SERVICE_NAME $DBUS_OBJECT $DBUS_INTERFACE_NAME SetVcp isyqu 1 "" 0x10  90  0
 busctl --user call $DBUS_SERVICE_NAME $DBUS_OBJECT $DBUS_INTERFACE_NAME SetVcpWithContext isyqsu 1 "" 0x10  60 "my_app" 0
@@ -12,5 +13,6 @@ busctl --user call $DBUS_SERVICE_NAME $DBUS_OBJECT $DBUS_INTERFACE_NAME GetVcpMe
 busctl --user call $DBUS_SERVICE_NAME $DBUS_OBJECT $DBUS_INTERFACE_NAME GetCapabilitiesString isu 1 ""  0
 busctl --user call $DBUS_SERVICE_NAME $DBUS_OBJECT $DBUS_INTERFACE_NAME GetCapabilitiesMetadata isu 1 ""  0
 busctl --user call $DBUS_SERVICE_NAME $DBUS_OBJECT $DBUS_INTERFACE_NAME GetDisplayState isu 1 ""  0
-busctl --user call $DBUS_SERVICE_NAME $DBUS_OBJECT org.freedesktop.DBus.Properties Get ss "$DBUS_INTERFACE_NAME" StatusValues
-busctl --user call $DBUS_SERVICE_NAME $DBUS_OBJECT org.freedesktop.DBus.Properties Set ssv "$DBUS_INTERFACE_NAME" ServiceEmitConnectivitySignals b 1
+busctl --user call $DBUS_SERVICE_NAME $DBUS_OBJECT $DBUS_PROP_INTERFACE_NAME Get ss "$DBUS_INTERFACE_NAME" AttributesReturnedByDetect
+busctl --user call $DBUS_SERVICE_NAME $DBUS_OBJECT $DBUS_PROP_INTERFACE_NAME Get ss "$DBUS_INTERFACE_NAME" StatusValues
+busctl --user call $DBUS_SERVICE_NAME $DBUS_OBJECT $DBUS_PROP_INTERFACE_NAME Set ssv "$DBUS_INTERFACE_NAME" ServiceEmitConnectivitySignals b 1

@@ -10,7 +10,7 @@
 use base64::Engine;
 use base64::engine::general_purpose;
 use crossbeam_channel::{Receiver, Sender, unbounded};
-use ddcutil_backend::connectivity_polling::ServiceSharedState;
+use ddcutil_backend::connectivity_polling::{PollingController, PollingSharedState};
 use ddcutil_backend::ddcutil::{CapabilitiesData, InternalEvent, VcpFeatureMetadata, extract_edid_base64, start_watch_displays};
 use ddcutil_backend::{connectivity_polling, ddcutil, is_env_enabled};
 use log::{LevelFilter, debug, error, info};
@@ -47,28 +47,15 @@ pub enum DdcCiDbusDisplayEventType {
 pub struct DdcCiDbusService {
     pub(crate) parameters_locked: bool,
     pub(crate) connectivity_signals_enabled: bool,
-    /// Single mutex protecting all shared state
-    pub state: Arc<Mutex<ServiceSharedState>>,
-    /// Channel for sending events from the polling thread and native callback.
-    internal_event_sender: Sender<InternalEvent>,
+    pub polling: PollingController,
     /// Callers can elect to drop the high byte of simple non-continuous types.
     /// For simple non-continuous types the high byte may be garbage for some models of VDU.
     pub raw_values: bool,
 }
 
-impl DdcCiDbusService {
-    pub(crate) fn enable_polling_events(&self) {
-        let mut state = self.state.lock().unwrap();
-        state.events_enabled = true;
-    }
-}
 
 // ── Private helpers (not part of the D-Bus interface) ──────────────
 impl DdcCiDbusService {
-    /// Shared body for `detect` and `list_detected`.
-    ///
-    /// When `force_redetect` is true, a rescan is triggered before listing.
-    /// Returns `(status, displays, error_status, error_message)`.
 
     /// Well-known bus name this service requests.
     pub const SERVICE_NAME: &'static str = "local.ddc-ci.DdcCiService";
@@ -80,7 +67,7 @@ impl DdcCiDbusService {
         "manufacturer_id", "model_name", "serial_number", "product_code",
         "edid_txt", "binary_serial_number",];
 
-    pub fn new() -> (Self, Receiver<ddcutil::InternalEvent>) {
+    pub fn new() -> (Self, Receiver<InternalEvent>) {
 
         ddcutil::init().expect("ddcutil init failed");  // TODO suspect?
 
@@ -97,8 +84,7 @@ impl DdcCiDbusService {
         let service = Self {
             parameters_locked: is_env_enabled("DDC_CI_PARAMETERS_LOCKED", false),
             connectivity_signals_enabled: is_env_enabled("DDC_CI_CONNECTIVITY_SIGNALS", true),
-            state: Arc::new(Mutex::new(ServiceSharedState::default())),
-            internal_event_sender: internal_event_sender.clone(),
+            polling: PollingController::new(internal_event_sender.clone()),
             raw_values: is_env_enabled("DDC_CI_SIMPLE_RAW_VALUES", true),
         };
 
@@ -121,12 +107,16 @@ impl DdcCiDbusService {
             }
         }
         if is_env_enabled("DDC_CI_POLL_DISPLAYS", true) {
-            self.enable_polling_events();
+            self.polling.enable_events();
             debug!("DDC_CI_POLL_DISPLAYS enabled");
-            self.start_polling();
+            self.polling.start()
         }
     }
 
+    /// Shared body for `detect` and `list_detected`.
+    ///
+    /// When `force_redetect` is true, a rescan is triggered before listing.
+    /// Returns `(status, displays, error_status, error_message)`.
     fn list_displays_impl(
         &self,
         flags: u32,
@@ -177,7 +167,7 @@ impl DdcCiDbusService {
     }
 
     fn convert_capabilities_data(
-        data: ddcutil::CapabilitiesData,
+        data: CapabilitiesData,
     ) -> (
         String,
         u8,
@@ -190,7 +180,7 @@ impl DdcCiDbusService {
         let commands = data
             .commands
             .into_iter()
-            .map(|cmd| (cmd.code as u8, cmd.description))
+            .map(|cmd| (cmd.code, cmd.description))
             .collect();
 
         let capabilities: HashMap<u8, (String, String, HashMap<u8, String>)> = data
@@ -205,7 +195,7 @@ impl DdcCiDbusService {
                     .collect();
 
                 (
-                    feature.code as u8, // Keep as u8 instead of formatting to String
+                    feature.code, // Keep as u8 instead of formatting to String
                     (
                         feature.name,
                         feature.description,
@@ -225,47 +215,9 @@ impl DdcCiDbusService {
             "OK".to_string(),
         )
     }
-
-    // ----- Polling control -----
-
-    /// Start the polling thread if it's not already running.
-    pub fn start_polling(&self) {
-        let mut state = self.state.lock().unwrap();
-        if state.poll_thread.is_some() {
-            debug!("Polling thread already running");
-            return;
-        }
-
-        // Create an unbounded message channel to receive shutdown messages
-        let (shutdown_dispatcher, shutdown_listener) = unbounded();
-
-        let state_arc = self.state.clone();
-        let internal_event_sender = self.internal_event_sender.clone();
-
-        let handle = thread::spawn(move || {
-            connectivity_polling::polling_loop(state_arc, internal_event_sender, shutdown_listener);
-        });
-
-        state.poll_thread = Some(handle);
-        state.shutdown_dispatcher = Some(shutdown_dispatcher);
-        info!("Polling thread started");
-    }
-
-    /// Stop the polling thread if it's running.
-    pub fn stop_polling(&self) {
-        let mut state = self.state.lock().unwrap();
-        if let Some(shutdown_dispatcher) = state.shutdown_dispatcher.take() {
-            let _ = shutdown_dispatcher.send(());
-        }
-        if let Some(handle) = state.poll_thread.take() {
-            let _ = handle.join();
-        }
-        info!("Polling thread stopped");
-    }
-
 }
 
-const DDC_CI_DBUS_SERVICE_VERSION: &'static str = "1.0.0";
+const DDC_CI_DBUS_SERVICE_VERSION: &str = "1.0.0";
 
 #[interface(name = "local.ddc_ci.DdcCiInterface", spawn = false)]
 impl DdcCiDbusService {
@@ -748,8 +700,7 @@ impl DdcCiDbusService {
 
     #[zbus(property)]
     fn service_poll_interval(&self) -> u32 {
-        let state = self.state.lock().unwrap();
-        state.poll_interval_secs
+        self.polling.get_interval()
     }
 
     #[zbus(property)]
@@ -760,18 +711,13 @@ impl DdcCiDbusService {
         if seconds > 0 && seconds < 10 {
             return Err(FdoError::InvalidArgs("poll interval too small".to_string()));
         }
-        let mut state = self.state.lock().unwrap();
-        state.poll_interval_secs = seconds;
-        if seconds == 0 {
-            self.stop_polling()
-        }
+        self.polling.set_interval(seconds);
         Ok(())
     }
 
     #[zbus(property)]
     fn service_poll_cascade_interval(&self) -> f64 {
-        let state = self.state.lock().unwrap();
-        state.poll_cascade_secs
+        self.polling.get_cascade_seconds()
     }
 
     #[zbus(property)]
@@ -782,8 +728,7 @@ impl DdcCiDbusService {
         if seconds < 0.0 || (seconds > 0.0 && seconds < 1.0) {
             return Err(FdoError::InvalidArgs("poll cascade interval too small".to_string()));
         }
-        let mut state = self.state.lock().unwrap();
-        state.poll_cascade_secs = seconds;
+        self.polling.set_cascade_seconds(seconds);
         Ok(())}
 }
 
@@ -826,5 +771,5 @@ fn error_code(e: &ddcutil::Error) -> i32 {
 }
 
 fn error_message(prefix: &str, e: &ddcutil::Error) -> String {
-    return format!("{}: {}", prefix, e);
+    format!("{}: {}", prefix, e)
 }

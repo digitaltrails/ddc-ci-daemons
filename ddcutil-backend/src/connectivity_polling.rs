@@ -6,7 +6,7 @@
 //! (libddcutil does not handle DPMS and on some hardware cannot detect
 //! connectivity changes)
 
-use crate::ddcutil;
+use crate::{connectivity_polling, ddcutil};
 use crate::ddcutil::{
     DisplayRef,
     InternalEvent,
@@ -14,16 +14,95 @@ use crate::ddcutil::{
 };
 
 use base64::{engine::general_purpose, Engine as _};
-use crossbeam_channel::{Receiver, Sender};
+use crossbeam_channel::{unbounded, Receiver, Sender};
 use log::{debug, error, info};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+pub struct PollingController {
+    state: Arc<Mutex<PollingSharedState>>,
+    event_sender: Sender<InternalEvent>,
+}
+
+impl PollingController {
+
+    pub fn new(event_sender: Sender<InternalEvent>) -> Self {
+        PollingController {
+            state: Arc::new(Mutex::new(PollingSharedState::default())),
+            event_sender,
+        }
+    }
+
+    pub fn shared_state(&self) -> Arc<Mutex<PollingSharedState>> {
+        self.state.clone()
+    }
+
+    pub fn start(&self) {
+        let mut state = self.state.lock().unwrap();
+        if state.poll_thread.is_some() {
+            debug!("Polling thread already running");
+            return;
+        }
+
+        // Create an unbounded message channel to receive shutdown messages
+        let (shutdown_dispatcher, shutdown_listener) = unbounded();
+
+        let state_arc = self.state.clone();
+        let internal_event_sender = self.event_sender.clone();
+
+        let handle = thread::spawn(move || {
+            connectivity_polling::polling_loop(state_arc, internal_event_sender, shutdown_listener);
+        });
+
+        state.poll_thread = Some(handle);
+        state.shutdown_dispatcher = Some(shutdown_dispatcher);
+        info!("Polling thread started");
+    }
+
+    pub fn stop(&self)  {
+        let mut state = self.state.lock().unwrap();
+        if let Some(shutdown_dispatcher) = state.shutdown_dispatcher.take() {
+            let _ = shutdown_dispatcher.send(());
+        }
+        if let Some(handle) = state.poll_thread.take() {
+            let _ = handle.join();
+        }
+        info!("Polling thread stopped");
+    }
+
+    pub fn enable_events(&self) {
+        let mut state = self.state.lock().unwrap();
+        state.events_enabled = true;
+    }
+
+    pub fn get_interval(&self) -> u32 {
+        let state = self.state.lock().unwrap();
+        state.poll_interval_secs
+    }
+
+    pub fn set_interval(&self, seconds: u32) {
+        let mut state = self.state.lock().unwrap();
+        state.poll_interval_secs = seconds;
+        if seconds == 0 {
+            self.stop()
+        }
+    }
+
+    pub fn get_cascade_seconds(&self) -> f64 {
+        let state = self.state.lock().unwrap();
+        state.poll_cascade_secs
+    }
+
+    pub fn set_cascade_seconds(&self, seconds: f64) {
+        let mut state = self.state.lock().unwrap();
+        state.poll_cascade_secs = seconds;
+      }
+}
 
 // ============================================================================
-// ServiceState – everything protected by the single lock
+// PollingSharedState – everything protected by the single lock
 // ============================================================================
 
 /// All state that must be protected by the single mutex.
@@ -33,7 +112,7 @@ use std::time::Duration;
 /// version <= 2.1. From 2.2 onward libddcutil events for hotplugging of monitors
 /// seems to be reliable for all drivers.  This option is provided in incase there
 /// is someone out there that still has issues or wants to use an old libddutil.
-pub struct ServiceSharedState {
+pub struct PollingSharedState {
     // Configuration
     pub poll_interval_secs: u32,
     pub poll_cascade_secs: f64,
@@ -44,7 +123,7 @@ pub struct ServiceSharedState {
     pub shutdown_dispatcher: Option<Sender<()>>,
 }
 
-impl Default for ServiceSharedState {
+impl Default for PollingSharedState {
     fn default() -> Self {
         let poll_do_detect = std::env::var("DDC_CI_POLL_DO_REDETECT")
         .map(|val| val.to_lowercase() == "true" || val == "1")
@@ -74,7 +153,7 @@ struct DisplayState {
 
 /// The main polling loop. Runs in its own thread.
 pub fn polling_loop(
-    state: Arc<Mutex<ServiceSharedState>>,
+    state: Arc<Mutex<PollingSharedState>>,
     internal_event_sender: Sender<InternalEvent>,
     shutdown_request_receiver: Receiver<()>,
 ) {
@@ -85,7 +164,7 @@ pub fn polling_loop(
 
     loop {
         if initializing {
-            debug!("polling_loop: Polling loop top initilizing");
+            debug!("polling_loop: Polling loop top initializing");
         }
         
         // Check for shutdown signal
@@ -119,7 +198,6 @@ pub fn polling_loop(
         }
 
         // ---- Call libddcutil (safe because we hold the lock) ----
-
 
         if do_redetect {
             // This code is provided in incase there is someone out there that still

@@ -211,8 +211,8 @@ impl VarlinkInterface for DdcCiVarlinkService {
     ) -> varlink::Result<()> {
         debug_varlink_call!(call);
         // No lock needed for a simple read – but we acquire it anyway for consistency
-        let guard = self.state.lock().unwrap();
-        call.reply(guard.poll_cascade_secs)
+        //let _lock = self.state.lock().unwrap();
+        call.reply(self.polling.get_cascade_seconds())
     }
 
     fn get_service_poll_interval(
@@ -220,8 +220,8 @@ impl VarlinkInterface for DdcCiVarlinkService {
         call: &mut dyn Call_GetServicePollInterval,
     ) -> varlink::Result<()> {
         debug_varlink_call!(call);
-        let guard = self.state.lock().unwrap();
-        call.reply(guard.poll_interval_secs as i64)
+        //let _lock = self.state.lock().unwrap();
+        call.reply(self.polling.get_interval() as i64)
     }
 
     fn get_sleep_multiplier(
@@ -373,8 +373,8 @@ impl VarlinkInterface for DdcCiVarlinkService {
                 varlink::ErrorKind::InvalidParameter("InvalidPollInterval".to_owned()).into(),
             );
         }
-        let mut state = self.state.lock().unwrap();
-        state.poll_cascade_secs = seconds;
+        //let _lock = self.state.lock().unwrap();
+        self.polling.set_cascade_seconds(seconds);
         call.reply()
     }
 
@@ -394,12 +394,8 @@ impl VarlinkInterface for DdcCiVarlinkService {
                 varlink::ErrorKind::InvalidParameter("InvalidPollInterval".to_owned()).into(),
             );
         }
-        let mut state = self.state.lock().unwrap();
-        state.poll_interval_secs = seconds as u32;
-        if seconds == 0 {
-            self.stop_polling()
-        }
-
+        //let _lock = self.state.lock().unwrap();
+        self.polling.set_interval(seconds as u32);
         call.reply()
     }
 
@@ -486,13 +482,10 @@ impl VarlinkInterface for DdcCiVarlinkService {
 
         // Each of these calls stays unfinished, looping/waiting for new events, and sending them.
 
-        self.start_polling();
+        self.polling.start();
 
         // Enable events (this also starts/stop native watch)
-        if let Err(e) = self.set_events_enabled(true) {
-            // Possibly not serious - might already be watching, which is an error?
-            error!("Failed to enable events: {}", e);
-        }
+        self.polling.enable_events();
 
         // Tell the client we're going to stream multiple events
         call.set_continues(true);

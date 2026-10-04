@@ -91,22 +91,8 @@ impl From<Error> for varlink::Error {
     }
 }
 
-/// Converts a nullable C string pointer to a Rust `String`.
-/// If the pointer is null, returns the provided default (which can be a `&str` or `String`).
-/// # Safety
-/// The caller must ensure that the pointer is either null or points to a valid,
-/// null‑terminated C string.
-fn c_ptr_to_string(ptr: *const c_char, default: impl Into<String>) -> String {
-    if ptr.is_null() {
-        default.into()
-    } else {
-        unsafe { CStr::from_ptr(ptr) }
-            .to_string_lossy()
-            .into_owned()
-    }
-}
-
 pub type Result<T> = std::result::Result<T, Error>;
+
 
 // RAII handle for display
 pub struct DisplayHandle {
@@ -345,6 +331,11 @@ impl DisplayList {
     pub fn len(&self) -> usize {
         let list = unsafe { &*self.ptr };
         list.ct as usize
+    }
+
+    pub fn is_empty(&self) -> bool {
+        let list = unsafe { &*self.ptr };
+        list.ct == 0
     }
 
     /// Iterate over all displays (useful for Detect)
@@ -1102,5 +1093,20 @@ pub fn extract_edid_base64(internal_event: &InternalEvent) -> String {
     match serde_json::from_str::<serde_json::Value>(&internal_event.data) {
         Ok(value) => value["edid_base64"].as_str().unwrap_or("").to_string(),
         Err(_) => String::new(),
+    }
+}
+
+/// Converts a nullable C string pointer to a Rust `String`.
+/// If the pointer is null, returns the provided default (which can be a `&str` or `String`).
+/// # Safety
+/// The caller must ensure that the pointer is either null or points to a valid,
+/// null‑terminated C string.
+fn c_ptr_to_string(ptr: *const c_char, default: impl Into<String>) -> String {
+    if ptr.is_null() {
+        default.into()
+    } else {
+        unsafe { CStr::from_ptr(ptr) }
+            .to_string_lossy()
+            .into_owned()
     }
 }
