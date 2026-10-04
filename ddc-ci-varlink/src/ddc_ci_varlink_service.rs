@@ -3,19 +3,19 @@
 
 //! DdcCiVarlinkService – service implementation
 
-use ddcutil_backend::ddcutil::{InternalEvent};
+use ddcutil_backend::ddcutil::{DisplayManager, InternalEvent};
 use ddcutil_backend::{ddcutil, is_env_enabled};
 use crate::ddc_ci_varlink_subscribers;
 use crossbeam_channel::{unbounded, Sender};
 use log::{error, info};
 use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc};
 
-use ddcutil_backend::connectivity_polling::{PollingController, PollingSharedState};
+use ddcutil_backend::connectivity_polling::{PollingController};
 
 pub struct DdcCiVarlinkService {
-    pub state: Arc<Mutex<PollingSharedState>>,
-    pub polling: PollingController,
+    pub display_manager: DisplayManager,
+    pub polling_controller: PollingController,
     pub configuration_locked: Arc<AtomicBool>,
     pub raw_values: bool,
 }
@@ -33,27 +33,23 @@ impl DdcCiVarlinkService {
     /// to forward events for dispatch to external varlink subscribers.
     pub fn new() -> Self {
 
-        // Initialize libddcutil
-        ddcutil::init().expect("ddcutil init failed"); // TODO suspect?
-
         // Create event channel
         let (internal_event_sender, internal_event_receiver) = unbounded();
 
-        // Store the sender globally for the native C callback
-        ddcutil::set_internal_event_sender(internal_event_sender.clone()).unwrap();
-
-        // Register the native callback (C callback)
-        if let Err(status) = ddcutil::register_callback(Some(ddcutil::native_ddc_event_callback)) {
-            error!("Failed to register ddcutil event callback: {:?}", status)
-        };
-
-
-        let polling_controller = PollingController::new(internal_event_sender.clone());
+        let display_manager = ddcutil::DisplayManager::new(internal_event_sender.clone()).expect("ddcutil::new failed");
+        let polling_controller = PollingController::new(display_manager.clone(), internal_event_sender.clone());
         let service = Self {
-            state: polling_controller.shared_state(),
-            polling: polling_controller,
+            display_manager,
+            polling_controller,
             configuration_locked: Arc::new(AtomicBool::new(false)),
             raw_values: is_env_enabled("DDC_CI_SIMPLE_RAW_VALUES", true)
+        };
+
+        // Register the native callback (C callback).
+        // Must run after init()/DisplayManager::new(). Calling it earlier leaves watching disabled
+        // and start_watch_displays fails with -3014.
+        if let Err(status) = ddcutil::register_callback(Some(ddcutil::native_ddc_event_callback)) {
+            error!("Failed to register ddcutil event callback: {:?}", status)
         };
 
         // InternalEvents are forwarded to the subscribers module which converts 

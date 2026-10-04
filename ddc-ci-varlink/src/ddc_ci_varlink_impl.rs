@@ -41,15 +41,14 @@ fn to_detect_entry(info: DisplayInfo) -> DetectEntry {
 impl VarlinkInterface for DdcCiVarlinkService {
     fn detect(&self, call: &mut dyn Call_Detect, include_offline: bool) -> varlink::Result<()> {
         debug_varlink_call!(call);
-        // Acquire the lock once for the entire operation
-        let _guard = self.state.lock().unwrap();
+        let dg = self.display_manager.acquire();
 
-        if let Err(e) = ddcutil::redetect() {
+        if let Err(e) = dg.redetect() {
             let err_msg = format!("Detect failed: {}", e);
             call.reply_detect_error(e.status_code(), err_msg)?;
             return Ok(());
         }
-        let displays = ddcutil::list_displays(include_offline)?;
+        let displays = dg.list_displays(include_offline)?;
         let detect_entries: Vec<DetectEntry> = displays.into_iter().map(to_detect_entry).collect();
         call.reply(detect_entries.len() as i64, detect_entries)
     }
@@ -62,14 +61,14 @@ impl VarlinkInterface for DdcCiVarlinkService {
         options: Option<CallOptions>,
     ) -> varlink::Result<()> {
         debug_varlink_call!(call);
-        let _guard = self.state.lock().unwrap();
+        let dg = self.display_manager.acquire();
 
         let ddc_operation = || -> std::result::Result<_, ddcutil::Error> {
             let edid_ref = edid_base64.as_deref();
             let dref =
-                ddcutil::find_display(display_number, edid_ref, is_edid_prefix_allowed(&options))?;
-            let handle = ddcutil::open_display(dref)?;
-            let caps = ddcutil::get_capabilities_data(handle)?;
+                dg.find_display(display_number, edid_ref, is_edid_prefix_allowed(&options))?;
+            let handle = dg.open_display(dref)?;
+            let caps = dg.get_capabilities_data(handle)?;
             Ok(convert_capabilities_data(caps))
         };
 
@@ -89,14 +88,14 @@ impl VarlinkInterface for DdcCiVarlinkService {
         options: Option<CallOptions>,
     ) -> varlink::Result<()> {
         debug_varlink_call!(call);
-        let _guard = self.state.lock().unwrap();
+        let dg = self.display_manager.acquire();
 
         let ddc_operation = || -> std::result::Result<_, ddcutil::Error> {
             let edid_ref = edid_base64.as_deref();
             let dref =
-                ddcutil::find_display(display_number, edid_ref, is_edid_prefix_allowed(&options))?;
-            let handle = ddcutil::open_display(dref)?;
-            ddcutil::get_capabilities_string(&handle)
+                dg.find_display(display_number, edid_ref, is_edid_prefix_allowed(&options))?;
+            let handle = dg.open_display(dref)?;
+            dg.get_capabilities_string(&handle)
         };
 
         match ddc_operation() {
@@ -110,8 +109,8 @@ impl VarlinkInterface for DdcCiVarlinkService {
         call: &mut dyn Call_GetDdcutilDynamicSleep,
     ) -> varlink::Result<()> {
         debug_varlink_call!(call);
-        let _guard = self.state.lock().unwrap();
-        call.reply(ddcutil::is_dynamic_sleep_enabled())
+        let dg = self.display_manager.acquire();
+        call.reply(dg.is_dynamic_sleep_enabled())
     }
 
     fn get_ddcutil_output_level(
@@ -119,14 +118,14 @@ impl VarlinkInterface for DdcCiVarlinkService {
         call: &mut dyn Call_GetDdcutilOutputLevel,
     ) -> varlink::Result<()> {
         debug_varlink_call!(call);
-        let _guard = self.state.lock().unwrap();
-        call.reply(ddcutil::get_output_level() as i64)
+        let dg = self.display_manager.acquire();
+        call.reply(dg.get_output_level() as i64)
     }
 
     fn get_ddcutil_version(&self, call: &mut dyn Call_GetDdcutilVersion) -> varlink::Result<()> {
         debug_varlink_call!(call);
-        let _guard = self.state.lock().unwrap();
-        call.reply(ddcutil::get_ddcutil_version())
+        let dg = self.display_manager.acquire();
+        call.reply(dg.get_ddcutil_version())
     }
 
     fn get_display_state(
@@ -137,10 +136,10 @@ impl VarlinkInterface for DdcCiVarlinkService {
         options: Option<CallOptions>,
     ) -> varlink::Result<()> {
         debug_varlink_call!(call);
-        let _guard = self.state.lock().unwrap();
+        let dg = self.display_manager.acquire();
 
         let ddc_operation = || -> std::result::Result<_, ddcutil::Error> {
-            let (status, message) = ddcutil::get_display_state(
+            let (status, message) = dg.get_display_state(
                 display_number,
                 edid_base64.as_deref(),
                 is_edid_prefix_allowed(&options),
@@ -163,9 +162,9 @@ impl VarlinkInterface for DdcCiVarlinkService {
         options: Option<CallOptions>,
     ) -> varlink::Result<()> {
         debug_varlink_call!(call);
-        let _guard = self.state.lock().unwrap();
+        let dg = self.display_manager.acquire();
 
-        let dref = match ddcutil::find_display(
+        let dref = match dg.find_display(
             display_number,
             edid_base64.as_deref(),
             is_edid_prefix_allowed(&options),
@@ -173,14 +172,14 @@ impl VarlinkInterface for DdcCiVarlinkService {
             Ok(d) => d,
             Err(e) => return send_ddc_error(call, None, display_number, edid_base64, None, &e),
         };
-        let handle = match ddcutil::open_display(dref) {
+        let handle = match dg.open_display(dref) {
             Ok(h) => h,
             Err(e) => return send_ddc_error(call, None, display_number, edid_base64, None, &e),
         };
 
         let mut values = Vec::new();
         for &code in &vcp_codes {
-            match ddcutil::get_vcp(&handle, code as u8, self.raw_values) {
+            match dg.get_vcp(&handle, code as u8, self.raw_values) {
                 Ok((current, max, formatted)) => {
                     values.push(VcpValue {
                         vcp_code: code,
@@ -212,7 +211,7 @@ impl VarlinkInterface for DdcCiVarlinkService {
         debug_varlink_call!(call);
         // No lock needed for a simple read – but we acquire it anyway for consistency
         //let _lock = self.state.lock().unwrap();
-        call.reply(self.polling.get_cascade_seconds())
+        call.reply(self.polling_controller.get_cascade_seconds())
     }
 
     fn get_service_poll_interval(
@@ -221,7 +220,7 @@ impl VarlinkInterface for DdcCiVarlinkService {
     ) -> varlink::Result<()> {
         debug_varlink_call!(call);
         //let _lock = self.state.lock().unwrap();
-        call.reply(self.polling.get_interval() as i64)
+        call.reply(self.polling_controller.get_interval() as i64)
     }
 
     fn get_sleep_multiplier(
@@ -232,15 +231,15 @@ impl VarlinkInterface for DdcCiVarlinkService {
         options: Option<CallOptions>,
     ) -> varlink::Result<()> {
         debug_varlink_call!(call);
-        let _guard = self.state.lock().unwrap();
+        let dg = self.display_manager.acquire();
 
         let ddc_operation = || -> std::result::Result<_, ddcutil::Error> {
-            let dref = ddcutil::find_display(
+            let dref = dg.find_display(
                 display_number,
                 edid_base64.as_deref(),
                 is_edid_prefix_allowed(&options),
             )?;
-            ddcutil::get_sleep_multiplier(dref)
+            dg.get_sleep_multiplier(dref)
         };
 
         match ddc_operation() {
@@ -258,16 +257,16 @@ impl VarlinkInterface for DdcCiVarlinkService {
         options: Option<CallOptions>,
     ) -> varlink::Result<()> {
         debug_varlink_call!(call);
-        let _guard = self.state.lock().unwrap();
+        let dg = self.display_manager.acquire();
 
         let ddc_operation = || -> std::result::Result<_, ddcutil::Error> {
-            let dref = ddcutil::find_display(
+            let dref = dg.find_display(
                 display_number,
                 edid_base64.as_deref(),
                 is_edid_prefix_allowed(&options),
             )?;
-            let handle = ddcutil::open_display(dref)?;
-            let (current, max, formatted) = ddcutil::get_vcp(&handle, vcp_code as u8, self.raw_values)?;
+            let handle = dg.open_display(dref)?;
+            let (current, max, formatted) = dg.get_vcp(&handle, vcp_code as u8, self.raw_values)?;
             Ok((current as u32, max as u32, formatted))
         };
 
@@ -286,16 +285,16 @@ impl VarlinkInterface for DdcCiVarlinkService {
         options: Option<CallOptions>,
     ) -> varlink::Result<()> {
         debug_varlink_call!(call);
-        let _guard = self.state.lock().unwrap();
+        let dg = self.display_manager.acquire();
 
         let ddc_operation = || -> std::result::Result<_, ddcutil::Error> {
-            let dref = ddcutil::find_display(
+            let dref = dg.find_display(
                 display_number,
                 edid_base64.as_deref(),
                 is_edid_prefix_allowed(&options),
             )?;
-            let handle = ddcutil::open_display(dref)?;
-            ddcutil::get_vcp_metadata(&handle, vcp_code)
+            let handle = dg.open_display(dref)?;
+            dg.get_vcp_metadata(&handle, vcp_code)
         };
 
         match ddc_operation() {
@@ -318,8 +317,8 @@ impl VarlinkInterface for DdcCiVarlinkService {
         include_offline: bool,
     ) -> varlink::Result<()> {
         debug_varlink_call!(call);
-        let _guard = self.state.lock().unwrap();
-        let displays = ddcutil::list_displays(include_offline)?;
+        let dg = self.display_manager.acquire();
+        let displays = dg.list_displays(include_offline)?;
         let detect_entries: Vec<DetectEntry> = displays.into_iter().map(to_detect_entry).collect();
         call.reply(detect_entries.len() as i64, detect_entries)
     }
@@ -335,8 +334,8 @@ impl VarlinkInterface for DdcCiVarlinkService {
                 varlink::ErrorKind::InvalidParameter("ConfigurationLocked".to_owned()).into(),
             );
         }
-        let _guard = self.state.lock().unwrap();
-        _ = ddcutil::enable_dynamic_sleep(enabled);
+        let dg = self.display_manager.acquire();
+        _ = dg.enable_dynamic_sleep(enabled);
         call.reply()
     }
 
@@ -351,8 +350,8 @@ impl VarlinkInterface for DdcCiVarlinkService {
                 varlink::ErrorKind::InvalidParameter("ConfigurationLocked".to_owned()).into(),
             );
         }
-        let _guard = self.state.lock().unwrap();
-        ddcutil::set_output_level(level as u32);
+        let dg = self.display_manager.acquire();
+        dg.set_output_level(level as u32);
 
         call.reply()
     }
@@ -374,7 +373,7 @@ impl VarlinkInterface for DdcCiVarlinkService {
             );
         }
         //let _lock = self.state.lock().unwrap();
-        self.polling.set_cascade_seconds(seconds);
+        self.polling_controller.set_cascade_seconds(seconds);
         call.reply()
     }
 
@@ -395,7 +394,7 @@ impl VarlinkInterface for DdcCiVarlinkService {
             );
         }
         //let _lock = self.state.lock().unwrap();
-        self.polling.set_interval(seconds as u32);
+        self.polling_controller.set_interval(seconds as u32);
         call.reply()
     }
 
@@ -414,14 +413,14 @@ impl VarlinkInterface for DdcCiVarlinkService {
             );
         }
 
-        let _guard = self.state.lock().unwrap();
+        let dg = self.display_manager.acquire();
         let ddc_operation = || -> std::result::Result<_, ddcutil::Error> {
-            let dref = ddcutil::find_display(
+            let dref = dg.find_display(
                 display_number,
                 edid_base64.as_deref(),
                 is_edid_prefix_allowed(&options),
             )?;
-            ddcutil::set_sleep_multiplier(dref, new_multiplier)?;
+            dg.set_sleep_multiplier(dref, new_multiplier)?;
             Ok(())
         };
 
@@ -448,17 +447,17 @@ impl VarlinkInterface for DdcCiVarlinkService {
             );
         }
 
-        let _guard = self.state.lock().unwrap();
+        let dg = self.display_manager.acquire();
         let ddc_operation = || -> std::result::Result<_, ddcutil::Error> {
-            let dref = ddcutil::find_display(
+            let dref = dg.find_display(
                 display_number,
                 edid_base64.as_deref(),
                 is_edid_prefix_allowed(&options),
             )?;
-            let handle = ddcutil::open_display(dref)?;
+            let handle = dg.open_display(dref)?;
             let verify = is_setvcp_verifying(&options);
 
-            ddcutil::set_vcp(&handle, vcp_code as u8, new_value as u16, verify)?;
+            dg.set_vcp(&handle, vcp_code as u8, new_value as u16, verify)?;
 
             Self::broadcast_set_vcp(
                 display_number,
@@ -482,10 +481,10 @@ impl VarlinkInterface for DdcCiVarlinkService {
 
         // Each of these calls stays unfinished, looping/waiting for new events, and sending them.
 
-        self.polling.start();
+        self.polling_controller.start();
 
         // Enable events (this also starts/stop native watch)
-        self.polling.enable_events();
+        self.polling_controller.enable_events();
 
         // Tell the client we're going to stream multiple events
         call.set_continues(true);

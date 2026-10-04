@@ -7,11 +7,7 @@
 //! connectivity changes)
 
 use crate::{connectivity_polling, ddcutil};
-use crate::ddcutil::{
-    DisplayRef,
-    InternalEvent,
-    InternalEventType,
-};
+use crate::ddcutil::{DisplayManager, DisplayRef, InternalEvent, InternalEventType};
 
 use base64::{engine::general_purpose, Engine as _};
 use crossbeam_channel::{unbounded, Receiver, Sender};
@@ -23,14 +19,16 @@ use std::time::Duration;
 
 pub struct PollingController {
     state: Arc<Mutex<PollingSharedState>>,
+    display_manager: DisplayManager,
     event_sender: Sender<InternalEvent>,
 }
 
 impl PollingController {
 
-    pub fn new(event_sender: Sender<InternalEvent>) -> Self {
+    pub fn new(display_manager: DisplayManager, event_sender: Sender<InternalEvent>) -> Self {
         PollingController {
             state: Arc::new(Mutex::new(PollingSharedState::default())),
+            display_manager,
             event_sender,
         }
     }
@@ -50,10 +48,11 @@ impl PollingController {
         let (shutdown_dispatcher, shutdown_listener) = unbounded();
 
         let state_arc = self.state.clone();
+        let display_manager = self.display_manager.clone();
         let internal_event_sender = self.event_sender.clone();
 
         let handle = thread::spawn(move || {
-            connectivity_polling::polling_loop(state_arc, internal_event_sender, shutdown_listener);
+            connectivity_polling::polling_loop(state_arc, display_manager, internal_event_sender, shutdown_listener);
         });
 
         state.poll_thread = Some(handle);
@@ -154,6 +153,7 @@ struct DisplayState {
 /// The main polling loop. Runs in its own thread.
 pub fn polling_loop(
     state: Arc<Mutex<PollingSharedState>>,
+    display_manager: DisplayManager,
     internal_event_sender: Sender<InternalEvent>,
     shutdown_request_receiver: Receiver<()>,
 ) {
@@ -174,9 +174,9 @@ pub fn polling_loop(
         }
 
         // ---- Acquire the lock and read config ----
-        let guard = state.lock().unwrap();
+
         let (interval, cascade, do_redetect, events_enabled) = {
-            let cfg = &*guard;
+            let cfg = state.lock().unwrap();
             (
                 cfg.poll_interval_secs,
                 cfg.poll_cascade_secs,
@@ -191,30 +191,28 @@ pub fn polling_loop(
         }
 
         if !events_enabled {
-            drop(guard);
             ddcutil::sleep_interruptible(Duration::from_secs(5));
             debug!("polling_loop: Polling event enabled={}", events_enabled);
             continue;  // TODO - should we not exit now - or might events be re-enabled?
         }
 
         // ---- Call libddcutil (safe because we hold the lock) ----
+        let dg = display_manager.acquire();
 
         if do_redetect {
             // This code is provided in incase there is someone out there that still
             // has issues with detect or someone who wants to use an old libddutil.
-            if let Err(e) = ddcutil::redetect() {
+            if let Err(e) = dg.redetect() {
                 error!("redetect failed: {}", e);
-                drop(guard);
                 ddcutil::sleep_interruptible(Duration::from_secs(interval as u64));
                 continue;
             }
         }
 
-        let current_displays = match ddcutil::get_display_info_list(true) {
+        let current_displays = match dg.get_display_info_list(true) {
             Ok(list) => list,
             Err(e) => {
                 error!("get_display_info_list failed: {}", e);
-                drop(guard);
                 ddcutil::sleep_interruptible(Duration::from_secs(interval as u64));
                 continue;
             }
@@ -223,8 +221,8 @@ pub fn polling_loop(
         // Build current state (also needs libddcutil for DPMS check)
         let mut current_states = HashMap::with_capacity(current_displays.len());
         for display in &current_displays {
-            let edid = general_purpose::STANDARD.encode(display.edid_bytes);
-            let awake = match ddcutil::is_dpms_awake(display.display_ref) {
+            let edid = general_purpose::STANDARD.encode(&display.edid_bytes);
+            let awake = match dg.is_dpms_awake(display.display_ref) {
                 Ok(a) => a,
                 Err(e) => {
                     debug!(
@@ -242,9 +240,9 @@ pub fn polling_loop(
                 },
             );
         }
-
+        ;
         // ---- Release the lock before comparing states and sending events ----
-        drop(guard);
+        drop(dg);
 
         // Compare states (no lock needed)
         let current_edids: HashSet<_> = current_states.keys().collect();

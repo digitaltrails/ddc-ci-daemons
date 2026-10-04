@@ -18,12 +18,14 @@ use std::ffi::CStr;
 use std::os::raw::{c_char, c_int};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 use crate::ddcutil;
 
 // TODO: Could not find this - manually define for now
 const RCRANGE_DDC_START: i32 = 3000;
+
+const POLL_WAKE_STEP_MS: u64 = 250; // Check NEED_POLL every 250ms
 
 macro_rules! ddca_call {
     ($call:expr) => {{
@@ -41,6 +43,8 @@ macro_rules! ddca_call {
         }
     }};
 }
+
+static NEED_POLL: AtomicBool = AtomicBool::new(false);
 
 static INTERNAL_EVENT_SENDER: OnceLock<Sender<InternalEvent>> = OnceLock::new();
 
@@ -238,7 +242,7 @@ pub struct InternalEvent {
     // optionally: io_path, flags, etc.
 }
 
-pub fn list_displays(include_invalid: bool) -> Result<Vec<DisplayInfo>> {
+fn list_displays(include_invalid: bool) -> Result<Vec<DisplayInfo>> {
     let list = DisplayList::new(include_invalid)?;
     let mut result = Vec::with_capacity(list.len());
 
@@ -433,12 +437,12 @@ pub fn init() -> Result<()> {
     result
 }
 
-pub fn redetect() -> Result<()> {
+fn redetect() -> Result<()> {
     debug!("Redetect displays");
     ddca_call!(ddca_redetect_displays())
 }
 
-pub fn get_display_info_list(include_invalid: bool) -> Result<Vec<DisplayInfo>> {
+fn get_display_info_list(include_invalid: bool) -> Result<Vec<DisplayInfo>> {
     let mut list_ptr = ptr::null_mut();
 
     ddca_call!(ddca_get_display_info_list2(include_invalid, &mut list_ptr))?;
@@ -462,10 +466,145 @@ pub fn get_display_info_list(include_invalid: bool) -> Result<Vec<DisplayInfo>> 
     Ok(infos)
 }
 
+#[derive(Clone)]
+pub struct DisplayManager {
+    lock: Arc<Mutex<()>>,
+}
+
+
+impl DisplayManager {
+    pub fn new(internal_event_sender: Sender<InternalEvent>) -> Result<Self> {
+        info!("new display manager");
+        if init().is_err() {
+            error!("Failed to init ddcutil");
+        }
+        register_callback(Some(native_ddc_event_callback))?;
+        let manager = Self { lock: Arc::new(Mutex::new(())) };
+        // Store the sender globally for the native C callback
+        set_internal_event_sender(internal_event_sender.clone())?;
+        Ok(manager)
+    }
+
+    pub fn acquire(&self) -> DisplayGuard<'_> {
+        DisplayGuard { _g: self.lock.lock().unwrap() }
+    }
+}
+
+pub struct DisplayGuard<'lock> {  // lifetime lock to hold while performing ddcutil op's.
+    _g: MutexGuard<'lock, ()>,
+}
+
+impl DisplayGuard<'_> {
+
+    pub fn redetect(&self) -> Result<()> { redetect() }
+
+    pub fn list_displays(&self, include_invalid: bool) -> Result<Vec<DisplayInfo>> {
+        list_displays(include_invalid)
+    }
+
+    /// Find a display by number or EDID, returning the raw dref and the DisplayList
+    /// that keeps it alive. The caller must hold onto the DisplayList for the
+    /// lifetime of the dref.
+    pub fn find_display(
+        &self,
+        display_number: Option<i64>,
+        edid_base64: Option<&str>,
+        allow_edid_prefix: bool,
+    ) -> Result<DisplayRef> {
+        find_display(display_number, edid_base64, allow_edid_prefix)
+    }
+
+    pub fn get_display_info_list(&self, include_invalid: bool) -> Result<Vec<DisplayInfo>> {
+        get_display_info_list(include_invalid)
+    }
+
+    pub fn open_display(&self, dref: DisplayRef) -> Result<DisplayHandle> {
+        open_display(dref)
+    }
+
+    pub fn get_display_state(
+        &self,
+        display_number: Option<i64>,
+        edid_base64: Option<&str>,
+        allow_edid_prefix: bool,
+    ) -> Result<(DDCA_Status, String)> {
+        get_display_state(display_number, edid_base64, allow_edid_prefix)
+    }
+
+    pub fn is_dynamic_sleep_enabled(&self,) -> bool {
+        is_dynamic_sleep_enabled()
+    }
+
+    pub fn get_output_level(&self,) -> DDCA_Output_Level {
+        get_output_level()
+    }
+
+    pub fn get_ddcutil_version(&self,) -> String {
+        get_ddcutil_version()
+    }
+
+    pub fn get_vcp(&self, handle: &DisplayHandle, vcp_code: u8, raw: bool) -> Result<(u16, u16, String)> {
+        get_vcp(handle, vcp_code, raw)}
+
+    pub fn get_capabilities_string(&self, handle: &DisplayHandle) -> Result<String> {
+        get_capabilities_string(handle)
+    }
+
+    pub fn get_vcp_metadata(&self, handle: &DisplayHandle, feature_code: i64) -> Result<VcpFeatureMetadata> {
+        get_vcp_metadata(handle, feature_code)
+    }
+
+    pub fn set_vcp(&self, handle: &DisplayHandle, vcp_code: u8, value: u16, verify: bool) -> Result<()> {
+        set_vcp(handle, vcp_code, value, verify)
+    }
+
+    pub fn get_sleep_multiplier(&self, dref: DisplayRef) -> Result<f64> {
+        get_sleep_multiplier(dref)
+    }
+
+    pub fn set_sleep_multiplier(&self, dref: DisplayRef, multiplier: f64) -> Result<()> {
+        set_sleep_multiplier(dref, multiplier)
+    }
+    pub fn get_feature_name(&self, code: u8) -> Result<String> {
+        get_feature_name(code)
+    }
+
+    pub fn get_capabilities_data(&self, handle: DisplayHandle) -> Result<CapabilitiesData> {
+        get_capabilities_data(handle)
+    }
+
+    pub fn get_status_values(&self, ) -> HashMap<i32, String> {
+        get_status_values()
+    }
+
+    pub fn is_dpms_awake(&self, dref: DisplayRef) -> Result<bool> {
+        is_dpms_awake(dref)
+    }
+
+    pub fn stop_watch_displays(&self, ) -> Result<()> {
+        stop_watch_displays()
+    }
+
+    pub fn start_watch_displays(&self, ) -> Result<()> {
+        debug!("Starting watch displays.");
+        start_watch_displays()
+    }
+
+    pub fn enable_dynamic_sleep(&self, enabled: bool) -> bool {
+        enable_dynamic_sleep(enabled)
+    }
+
+    pub fn set_output_level(&self, level: u32) -> u32 {
+        set_output_level(level)
+    }
+
+}
+
+
 /// Find a display by number or EDID, returning the raw dref and the DisplayList
 /// that keeps it alive. The caller must hold onto the DisplayList for the
 /// lifetime of the dref.
-pub fn find_display(
+fn find_display(
     display_number: Option<i64>,
     edid_base64: Option<&str>,
     allow_edid_prefix: bool,
@@ -496,7 +635,7 @@ pub fn find_display(
         )
 }
 
-pub fn open_display(dref: DisplayRef) -> Result<DisplayHandle> {
+fn open_display(dref: DisplayRef) -> Result<DisplayHandle> {
     let mut handle: DDCA_Display_Handle = ptr::null_mut();
 
     ddca_call!(ddca_open_display2(
@@ -511,7 +650,7 @@ pub fn open_display(dref: DisplayRef) -> Result<DisplayHandle> {
     })
 }
 
-pub fn get_display_state(
+fn get_display_state(
     display_number: Option<i64>,
     edid_base64: Option<&str>,
     allow_edid_prefix: bool,
@@ -522,29 +661,21 @@ pub fn get_display_state(
     Ok((status, message))
 }
 
-pub fn is_dynamic_sleep_enabled() -> bool {
+fn is_dynamic_sleep_enabled() -> bool {
     unsafe { ddca_is_dynamic_sleep_enabled() }
 }
 
-pub fn get_output_level() -> DDCA_Output_Level {
+fn get_output_level() -> DDCA_Output_Level {
     unsafe { ddca_get_output_level() }
 }
 
-pub fn get_ddcutil_version() -> String {
+fn get_ddcutil_version() -> String {
     let version_ptr = unsafe { ddca_ddcutil_extended_version_string() };
     c_ptr_to_string(version_ptr, "unknown")
 }
 
-/// Frees a C string allocated by libddcutil.
-/// # Safety
-/// The pointer must have been allocated by `malloc` and not previously freed.
-unsafe fn free_c_string(ptr: *mut libc::c_char) {
-    if !ptr.is_null() {
-        libc::free(ptr as *mut libc::c_void);
-    }
-}
 
-pub fn get_vcp(handle: &DisplayHandle, vcp_code: u8, raw: bool) -> Result<(u16, u16, String)> {
+fn get_vcp(handle: &DisplayHandle, vcp_code: u8, raw: bool) -> Result<(u16, u16, String)> {
     let mut valrec = DDCA_Non_Table_Vcp_Value {
         mh: 0,
         ml: 0,
@@ -605,7 +736,7 @@ pub fn get_vcp(handle: &DisplayHandle, vcp_code: u8, raw: bool) -> Result<(u16, 
     Ok((current, max, formatted_str))
 }
 
-pub fn get_capabilities_string(handle: &DisplayHandle) -> Result<String> {
+fn get_capabilities_string(handle: &DisplayHandle) -> Result<String> {
     debug!("get_capabilities_string - found display");
     let mut caps_ptr: *mut libc::c_char = ptr::null_mut();
     let raw_handle = handle.ddca_handle;
@@ -630,7 +761,7 @@ pub struct VcpFeatureMetadata {
     pub is_continuous: bool,
 }
 
-pub fn get_vcp_metadata(handle: &DisplayHandle, feature_code: i64) -> Result<VcpFeatureMetadata> {
+fn get_vcp_metadata(handle: &DisplayHandle, feature_code: i64) -> Result<VcpFeatureMetadata> {
     debug!("get_capabilities_string - found display");
     let mut md_ptr: *mut DDCA_Feature_Metadata = ptr::null_mut();
     let raw_handle = handle.ddca_handle;
@@ -668,7 +799,7 @@ pub fn get_vcp_metadata(handle: &DisplayHandle, feature_code: i64) -> Result<Vcp
     Ok(result)
 }
 
-pub fn set_vcp(handle: &DisplayHandle, vcp_code: u8, value: u16, verify: bool) -> Result<()> {
+fn set_vcp(handle: &DisplayHandle, vcp_code: u8, value: u16, verify: bool) -> Result<()> {
     if !verify {
         debug!("set_vcp: non-verified set.")
     }
@@ -688,7 +819,7 @@ pub fn set_vcp(handle: &DisplayHandle, vcp_code: u8, value: u16, verify: bool) -
     ))
 }
 
-pub fn get_sleep_multiplier(dref: DisplayRef) -> Result<f64> {
+fn get_sleep_multiplier(dref: DisplayRef) -> Result<f64> {
     let mut multiplier = 0.0;
 
     ddca_call!(ddca_get_current_display_sleep_multiplier(
@@ -699,41 +830,21 @@ pub fn get_sleep_multiplier(dref: DisplayRef) -> Result<f64> {
     Ok(multiplier)
 }
 
-pub fn set_sleep_multiplier(dref: DisplayRef, multiplier: f64) -> Result<()> {
+fn set_sleep_multiplier(dref: DisplayRef, multiplier: f64) -> Result<()> {
     ddca_call!(ddca_set_display_sleep_multiplier(
         dref as DDCA_Display_Ref,
         multiplier
     ))
 }
 
-pub fn cstr_from_fixed_array<const N: usize>(arr: &[c_char; N]) -> String {
-    // Find the first null byte (0)
-    let len = arr.iter().position(|&c| c == 0).unwrap_or(N);
-    // Convert the bytes up to that length (as u8)
-    let bytes = &arr[..len] as &[c_char];
-    // Safety: c_char is i8 or u8; we reinterpret as u8.
-    let bytes_u8 = unsafe { std::slice::from_raw_parts(bytes.as_ptr() as *const u8, len) };
-    String::from_utf8_lossy(bytes_u8).replace('\x00', "?")
-}
-
-pub fn get_feature_name(code: u8) -> Result<String> {
+fn get_feature_name(code: u8) -> Result<String> {
     unsafe {
         let ptr = ddca_get_feature_name(code);
         Ok(c_ptr_to_string(ptr, format!("0x{:02x}", code)))
     }
 }
 
-fn extract_model(ptr: *const c_char) -> Option<String> {
-    // SAFETY: caller ensures pointer is valid and null‑terminated.
-    let c_str = unsafe { CStr::from_ptr(ptr) };
-    let input = c_str.to_str().ok()?;
-
-    let re = Regex::new(r"model\(([^)]*)\)").ok()?;
-    re.captures(input)
-        .and_then(|cap| cap.get(1).map(|m| m.as_str().to_string()))
-}
-
-pub fn get_capabilities_data(handle: DisplayHandle) -> Result<CapabilitiesData> {
+fn get_capabilities_data(handle: DisplayHandle) -> Result<CapabilitiesData> {
     // Get the raw capabilities string
     let mut caps_text_ptr: *mut libc::c_char = ptr::null_mut();
 
@@ -872,7 +983,7 @@ pub fn get_capabilities_data(handle: DisplayHandle) -> Result<CapabilitiesData> 
     })
 }
 
-pub fn get_status_values() -> HashMap<i32, String> {
+fn get_status_values() -> HashMap<i32, String> {
     let mut rc_map: HashMap<i32, String> = HashMap::new();
     let mut i = RCRANGE_DDC_START + 1;
     while unsafe { !ddcutil::ddca_rc_name(-i).is_null() } {
@@ -889,44 +1000,28 @@ pub fn get_status_values() -> HashMap<i32, String> {
     rc_map
 }
 
-static NEED_POLL: AtomicBool = AtomicBool::new(false);
-
-const POLL_WAKE_STEP_MS: u64 = 250; // Check NEED_POLL every 250ms
-
-/// Sleep for the given duration, but wake up early if NEED_POLL is set.
-/// Returns `true` if the sleep was interrupted by NEED_POLL.
-pub fn sleep_interruptible(duration: Duration) -> bool {
-    let step = Duration::from_millis(POLL_WAKE_STEP_MS);
-    let mut remaining = duration;
-
-    while remaining > Duration::ZERO {
-        let wait = std::cmp::min(remaining, step);
-        std::thread::sleep(wait);
-        remaining -= wait;
-
-        // Check if a callback wants us to poll immediately
-        if NEED_POLL.swap(false, Ordering::SeqCst) {
-            debug!("NEED_POLL triggered during sleep, waking up early");
-            return true;
-        }
-    }
-    false
-}
-
-pub fn is_dpms_awake(dref: DisplayRef) -> Result<bool> {
+fn is_dpms_awake(dref: DisplayRef) -> Result<bool> {
     let dmps_vp_code = 0xd6u8;
     let handle = open_display(dref)?;
     let (current, _, _) = get_vcp(&handle, dmps_vp_code, false)?;
     Ok(current != 0)
 }
 
-pub fn stop_watch_displays() -> Result<()> {
+fn stop_watch_displays() -> Result<()> {
     ddca_call!(ddca_stop_watch_displays(false))?;
     Ok(())
 }
 
-pub fn start_watch_displays() -> Result<()> {
-    // Use the ddca_call! macro from ddcutil
+fn start_watch_displays() -> Result<()> {
+    let classes_loc = DDCA_Display_Event_Class::default();
+    let already_running =  ddca_call!(ddca_get_active_watch_classes(classes_loc as *mut _)).is_ok();
+    if already_running {
+        info!("start libddcutil watch_displays - already running - stopping first. ({})", classes_loc);
+        ddca_call!(ddca_stop_watch_displays(true))?;
+    }
+    else {
+        info!("start libddcutil watch_displays - not running - starting");
+    }
     ddca_call!(ddca_start_watch_displays(
         DDCA_Display_Event_Class_DDCA_EVENT_CLASS_DPMS
             | DDCA_Display_Event_Class_DDCA_EVENT_CLASS_DISPLAY_CONNECTION
@@ -934,11 +1029,11 @@ pub fn start_watch_displays() -> Result<()> {
     Ok(())
 }
 
-pub fn enable_dynamic_sleep(enabled: bool) -> bool {
+fn enable_dynamic_sleep(enabled: bool) -> bool {
     unsafe { ddca_enable_dynamic_sleep(enabled) }
 }
 
-pub fn set_output_level(level: u32) -> u32 {
+fn set_output_level(level: u32) -> u32 {
     unsafe { ddca_set_output_level(level as DDCA_Output_Level) }
 }
 
@@ -1061,6 +1156,36 @@ pub fn build_vcp_changed_event(
     }
 }
 
+/// Sleep for the given duration, but wake up early if NEED_POLL is set.
+/// Returns `true` if the sleep was interrupted by NEED_POLL.
+pub fn sleep_interruptible(duration: Duration) -> bool {
+    let step = Duration::from_millis(POLL_WAKE_STEP_MS);
+    let mut remaining = duration;
+
+    while remaining > Duration::ZERO {
+        let wait = std::cmp::min(remaining, step);
+        std::thread::sleep(wait);
+        remaining -= wait;
+
+        // Check if a callback wants us to poll immediately
+        if NEED_POLL.swap(false, Ordering::SeqCst) {
+            debug!("NEED_POLL triggered during sleep, waking up early");
+            return true;
+        }
+    }
+    false
+}
+
+fn extract_model(ptr: *const c_char) -> Option<String> {
+    // SAFETY: caller ensures pointer is valid and null‑terminated.
+    let c_str = unsafe { CStr::from_ptr(ptr) };
+    let input = c_str.to_str().ok()?;
+
+    let re = Regex::new(r"model\(([^)]*)\)").ok()?;
+    re.captures(input)
+        .and_then(|cap| cap.get(1).map(|m| m.as_str().to_string()))
+}
+
 /// Builds an envent for a hotplug connect or disconnect.
 /// The edit_base64 may be empty for a disconnect (no longer available).
 pub fn build_hotplug_event(edid: &String, event_type: InternalEventType) -> InternalEvent {
@@ -1109,4 +1234,25 @@ fn c_ptr_to_string(ptr: *const c_char, default: impl Into<String>) -> String {
             .to_string_lossy()
             .into_owned()
     }
+}
+
+
+/// Frees a C string allocated by libddcutil.
+/// # Safety
+/// The pointer must have been allocated by `malloc` and not previously freed.
+unsafe fn free_c_string(ptr: *mut libc::c_char) {
+    if !ptr.is_null() {
+        libc::free(ptr as *mut libc::c_void);
+    }
+}
+
+
+pub fn cstr_from_fixed_array<const N: usize>(arr: &[c_char; N]) -> String {
+    // Find the first null byte (0)
+    let len = arr.iter().position(|&c| c == 0).unwrap_or(N);
+    // Convert the bytes up to that length (as u8)
+    let bytes = &arr[..len] as &[c_char];
+    // Safety: c_char is i8 or u8; we reinterpret as u8.
+    let bytes_u8 = unsafe { std::slice::from_raw_parts(bytes.as_ptr() as *const u8, len) };
+    String::from_utf8_lossy(bytes_u8).replace('\x00', "?")
 }

@@ -13,6 +13,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create our implementation of the service and obtain the receiver channel
     let (service, internal_event_receiver) = DdcCiDbusService::new();
 
+    // Begin monitoring before serving clients.
     service.start_event_monitoring();
 
     // Serve the interface

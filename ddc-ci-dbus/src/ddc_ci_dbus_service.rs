@@ -9,15 +9,14 @@
 
 use base64::Engine;
 use base64::engine::general_purpose;
-use crossbeam_channel::{Receiver, Sender, unbounded};
-use ddcutil_backend::connectivity_polling::{PollingController, PollingSharedState};
-use ddcutil_backend::ddcutil::{CapabilitiesData, InternalEvent, VcpFeatureMetadata, extract_edid_base64, start_watch_displays};
-use ddcutil_backend::{connectivity_polling, ddcutil, is_env_enabled};
+use crossbeam_channel::{Receiver, unbounded};
+use ddcutil_backend::connectivity_polling::{PollingController};
+use ddcutil_backend::ddcutil::{CapabilitiesData, InternalEvent, VcpFeatureMetadata, extract_edid_base64};
+use ddcutil_backend::{ddcutil, is_env_enabled};
 use log::{LevelFilter, debug, error, info};
 use std::collections::HashMap;
 use std::error::Error;
-use std::sync::{Arc, Mutex, OnceLock};
-use std::thread;
+use std::sync::{OnceLock};
 use strum::IntoEnumIterator;
 use strum::{Display, EnumIter};
 use zbus::blocking::{Connection, connection};
@@ -45,12 +44,14 @@ pub enum DdcCiDbusDisplayEventType {
 
 /// The main service object. Holds all state and (eventually).
 pub struct DdcCiDbusService {
+    pub(crate) display_manager: ddcutil::DisplayManager,
+    pub(crate) polling_controller: PollingController,
     pub(crate) parameters_locked: bool,
     pub(crate) connectivity_signals_enabled: bool,
-    pub polling: PollingController,
     /// Callers can elect to drop the high byte of simple non-continuous types.
     /// For simple non-continuous types the high byte may be garbage for some models of VDU.
     pub raw_values: bool,
+
 }
 
 
@@ -69,23 +70,23 @@ impl DdcCiDbusService {
 
     pub fn new() -> (Self, Receiver<InternalEvent>) {
 
-        ddcutil::init().expect("ddcutil init failed");  // TODO suspect?
-
         let (internal_event_sender, internal_event_receiver) = unbounded();
 
-        // Store the sender globally for the native C callback
-        ddcutil::set_internal_event_sender(internal_event_sender.clone()).unwrap();
-
-        // Register the native callback (C callback)
-        if let Err(status) = ddcutil::register_callback(Some(ddcutil::native_ddc_event_callback)) {
-            error!("Failed to register ddcutil event callback: {:?}", status)
-        };
-
+        let display_manager = ddcutil::DisplayManager::new(internal_event_sender.clone()).expect("dg.new failed");
+        let polling_controller = PollingController::new(display_manager.clone(), internal_event_sender.clone());
         let service = Self {
+            display_manager,
+            polling_controller,
             parameters_locked: is_env_enabled("DDC_CI_PARAMETERS_LOCKED", false),
             connectivity_signals_enabled: is_env_enabled("DDC_CI_CONNECTIVITY_SIGNALS", true),
-            polling: PollingController::new(internal_event_sender.clone()),
             raw_values: is_env_enabled("DDC_CI_SIMPLE_RAW_VALUES", true),
+        };
+
+        // Register the native callback (C callback).
+        // Must run after init()/DisplayManager::new(). Calling it earlier leaves watching disabled 
+        // and start_watch_displays fails with -3014.
+        if let Err(status) = ddcutil::register_callback(Some(ddcutil::native_ddc_event_callback)) {
+            error!("Failed to register ddcutil event callback: {:?}", status)
         };
 
         (service, internal_event_receiver)
@@ -93,23 +94,26 @@ impl DdcCiDbusService {
 
     pub fn serve_clients(self) -> zbus::Result<Connection> {
         // Blocking builder to bind and serve the interface
-        connection::Builder::session()?
+        let result = connection::Builder::session()?
             .name(Self::SERVICE_NAME)?
             .serve_at(Self::OBJECT_PATH, self)?
-            .build()
+            .build();
+        result
     }
 
     pub fn start_event_monitoring(&self) {
+        let dg = self.display_manager.acquire();
         if is_env_enabled("DDC_CI_WATCH_DISPLAYS", true) {
-            match start_watch_displays() {
+
+            match dg.start_watch_displays() {
                 Ok(()) => info!("Enabled libddcutil watch_displays."),
                 Err(e) => error!("Failed to enable libddcutil watch_displays, continuing anyway: {:?}", e),
             }
         }
         if is_env_enabled("DDC_CI_POLL_DISPLAYS", true) {
-            self.polling.enable_events();
+            self.polling_controller.enable_events();
             debug!("DDC_CI_POLL_DISPLAYS enabled");
-            self.polling.start()
+            self.polling_controller.start()
         }
     }
 
@@ -127,6 +131,7 @@ impl DdcCiDbusService {
         i32,
         String,
     ) {
+        let dg = self.display_manager.acquire();
         let ddc_operation = || -> Result<
             (
                 i32,
@@ -137,9 +142,9 @@ impl DdcCiDbusService {
             ddcutil::Error> {
 
             if detect {
-                ddcutil::redetect()?;
+                dg.redetect()?;
             }
-            let list = ddcutil::list_displays(flags & ServiceFlags::DetectAll as u32 != 0)?;
+            let list = dg.list_displays(flags & ServiceFlags::DetectAll as u32 != 0)?;
 
             let info_vec: Vec<_> = list
                 .into_iter()
@@ -272,16 +277,16 @@ impl DdcCiDbusService {
         vcp_code: u8,
         flags: u32,
     ) -> (u16, u16, String, i32, String) {
-
+        let dg = self.display_manager.acquire();
         let ddc_operation = || -> Result<(u16, u16, String, i32, String), ddcutil::Error> {
-            let dref = ddcutil::find_display(
+            let dref = dg.find_display(
                 Option::Some(display_number.into()),
                 Option::Some(edid_txt),
                 flags & ServiceFlags::EdidPrefixAllowed as u32 as u32 != 0,
             )?;
-            let handle = ddcutil::open_display(dref)?;
+            let handle = dg.open_display(dref)?;
             let want_raw_values = self.raw_values || flags & ServiceFlags::ReturnRawValues as u32 as u32 != 0;
-            let (current, max, formatted) = ddcutil::get_vcp(&handle, vcp_code, want_raw_values)?;
+            let (current, max, formatted) = dg.get_vcp(&handle, vcp_code, want_raw_values)?;
             Ok((current as u16, max as u16, formatted, 0, "OK".to_string()))
         };
 
@@ -299,18 +304,18 @@ impl DdcCiDbusService {
         vcp_codes: &[u8],
         flags: u32,
     ) -> (Vec<(u8, u16, u16, String)>, i32, String) {
-
+        let dg = self.display_manager.acquire();
         let ddc_operation = || -> Result<(Vec<(u8, u16, u16, String)>, i32, String), ddcutil::Error> {
-            let dref = ddcutil::find_display(
+            let dref = dg.find_display(
                 Option::Some(display_number.into()),
                 Option::Some(edid_txt),
                 flags & ServiceFlags::EdidPrefixAllowed as u32 != 0,
             )?;
             let want_raw_values = self.raw_values || flags & ServiceFlags::ReturnRawValues as u32 as u32 != 0;
-            let handle = ddcutil::open_display(dref)?;
+            let handle = dg.open_display(dref)?;
             let mut values = Vec::new();
             for &code in vcp_codes {
-                let (current, max, formatted) = ddcutil::get_vcp(&handle, code as u8, want_raw_values)?;
+                let (current, max, formatted) = dg.get_vcp(&handle, code as u8, want_raw_values)?;
                 values.push((code, current as u16, max as u16, formatted));
             }
             Ok((values, 0, "OK".to_string()))
@@ -359,15 +364,15 @@ impl DdcCiDbusService {
         client_context: &str,
         flags: u32,
     ) -> (i32, String) {
-
+        let dg = self.display_manager.acquire();
         let ddc_operation = || -> Result<(i32, String), ddcutil::Error> {
-            let dref = ddcutil::find_display(
+            let dref = dg.find_display(
                 Option::Some(display_number.into()),
                 Option::Some(edid_txt),
                 flags & ServiceFlags::EdidPrefixAllowed as u32 != 0,
             )?;
-            let handle = ddcutil::open_display(dref)?;
-            ddcutil::set_vcp(&handle, vcp_code as u8, vcp_new_value, flags & ServiceFlags::NoVerify as u32 != 0)?;
+            let handle = dg.open_display(dref)?;
+            dg.set_vcp(&handle, vcp_code as u8, vcp_new_value, flags & ServiceFlags::NoVerify as u32 != 0)?;
 
             let sender_str: String = hdr.sender()
                 .map(|name| name.to_string())
@@ -400,15 +405,15 @@ impl DdcCiDbusService {
         vcp_code: u8,
         flags: u32,
     ) -> (String, String, bool, bool, bool, bool, bool, i32, String) {
-
+        let dg = self.display_manager.acquire();
         let ddc_operation = || -> Result<(VcpFeatureMetadata, i32, String), ddcutil::Error> {
-            let dref = ddcutil::find_display(
+            let dref = dg.find_display(
                 Option::Some(display_number.into()),
                 Option::Some(edid_txt),
                 flags & ServiceFlags::EdidPrefixAllowed as u32 != 0,
             )?;
-            let handle = ddcutil::open_display(dref)?;
-            let metadata = ddcutil::get_vcp_metadata(&handle, vcp_code.into())?;
+            let handle = dg.open_display(dref)?;
+            let metadata = dg.get_vcp_metadata(&handle, vcp_code.into())?;
             Ok((metadata, 0, "OK".to_string()))
         };
 
@@ -443,15 +448,15 @@ impl DdcCiDbusService {
         edid_txt: &str,
         flags: u32,
     ) -> (String, i32, String) {
-
+        let dg = self.display_manager.acquire();
         let ddc_operation = || -> Result<(String, i32, String), ddcutil::Error> {
-            let dref = ddcutil::find_display(
+            let dref = dg.find_display(
                 Option::Some(display_number.into()),
                 Option::Some(edid_txt),
                 flags & ServiceFlags::EdidPrefixAllowed as u32 != 0,
             )?;
-            let handle = ddcutil::open_display(dref)?;
-            let caps_str = ddcutil::get_capabilities_string(&handle)?;
+            let handle = dg.open_display(dref)?;
+            let caps_str = dg.get_capabilities_string(&handle)?;
             Ok((caps_str, 0, "OK".to_string()))
         };
 
@@ -476,15 +481,15 @@ impl DdcCiDbusService {
         i32,
         String,
     ) {
-
+        let dg = self.display_manager.acquire();
         let ddc_operation = || -> Result<CapabilitiesData, ddcutil::Error> {
-            let dref = ddcutil::find_display(
+            let dref = dg.find_display(
                 Option::Some(display_number.into()),
                 Option::Some(edid_txt),
                 flags & ServiceFlags::EdidPrefixAllowed as u32 != 0,
             )?;
-            let handle = ddcutil::open_display(dref)?;
-            let caps_data = ddcutil::get_capabilities_data(handle)?;
+            let handle = dg.open_display(dref)?;
+            let caps_data = dg.get_capabilities_data(handle)?;
             Ok(caps_data)
         };
 
@@ -509,8 +514,8 @@ impl DdcCiDbusService {
         edid_txt: &str,
         flags: u32,
     ) -> (i32, String) {
-
-        match ddcutil::get_display_state(
+        let dg = self.display_manager.acquire();
+        match dg.get_display_state(
             Option::Some(display_number.into()),
             Option::Some(edid_txt),
             flags & ServiceFlags::EdidPrefixAllowed as u32 != 0,
@@ -527,14 +532,14 @@ impl DdcCiDbusService {
         edid_txt: &str,
         flags: u32,
     ) -> (f64, i32, String) {
-
+        let dg = self.display_manager.acquire();
         let ddc_operation = || -> Result<(f64, i32, String), ddcutil::Error> {
-            let dref = ddcutil::find_display(
+            let dref = dg.find_display(
                 Option::Some(display_number.into()),
                 Option::Some(edid_txt),
                 flags & ServiceFlags::EdidPrefixAllowed as u32 != 0,
             )?;
-            let multiplier = ddcutil::get_sleep_multiplier(dref)?;
+            let multiplier = dg.get_sleep_multiplier(dref)?;
             Ok((multiplier, 0, "OK".to_string()))
         };
 
@@ -552,13 +557,14 @@ impl DdcCiDbusService {
         new_multiplier: f64,
         flags: u32,
     ) -> (i32, String) {
+        let dg = self.display_manager.acquire();
         let ddc_operation = || -> Result<(i32, String), ddcutil::Error> {
-            let dref = ddcutil::find_display(
+            let dref = dg.find_display(
                 Option::Some(display_number.into()),
                 Option::Some(edid_txt),
                 flags & ServiceFlags::EdidPrefixAllowed as u32 != 0,
             )?;
-            ddcutil::set_sleep_multiplier(dref, new_multiplier)?;
+            dg.set_sleep_multiplier(dref, new_multiplier)?;
             Ok((0, "OK".to_string()))
         };
 
@@ -607,37 +613,47 @@ impl DdcCiDbusService {
 
     #[zbus(property)]
     fn status_values(&self) -> HashMap<i32, String> {
-        ddcutil::get_status_values()
+        let dg = self.display_manager.acquire();
+        dg.get_status_values()
     }
 
     #[zbus(property)]
     fn ddcutil_version(&self) -> &str {
         static VERSION_CACHE: OnceLock<String> = OnceLock::new();
         VERSION_CACHE.get_or_init(|| {
-            ddcutil::get_ddcutil_version()
+            let dg = self.display_manager.acquire();
+            dg.get_ddcutil_version()
         }) }
 
     #[zbus(property)]
-    fn ddcutil_dynamic_sleep(&self) -> bool { ddcutil::is_dynamic_sleep_enabled() }
+    fn ddcutil_dynamic_sleep(&self) -> bool {
+        let dg = self.display_manager.acquire();
+        dg.is_dynamic_sleep_enabled()
+    }
 
     #[zbus(property)]
     fn set_ddcutil_dynamic_sleep(&mut self, value: bool) -> Result<(), FdoError> {
         if self.parameters_locked {
             return Err(FdoError::AccessDenied("configuration locked".to_string()));
         }
-        ddcutil::enable_dynamic_sleep(value);
+        let dg = self.display_manager.acquire();
+        dg.enable_dynamic_sleep(value);
         Ok(())
     }
 
     #[zbus(property)]
-    fn ddcutil_output_level(&self) -> u32 { ddcutil::get_output_level() }
+    fn ddcutil_output_level(&self) -> u32 {
+        let dg = self.display_manager.acquire();
+        dg.get_output_level()
+    }
 
     #[zbus(property)]
     fn set_ddcutil_output_level(&mut self, value: u32) -> Result<(), FdoError> {
         if self.parameters_locked {
             return Err(FdoError::AccessDenied("configuration locked".to_string()));
         }
-        ddcutil::set_output_level(value);
+        let dg = self.display_manager.acquire();
+        dg.set_output_level(value);
         Ok(())
     }
 
@@ -675,14 +691,15 @@ impl DdcCiDbusService {
         if self.parameters_locked {
             return Err(FdoError::AccessDenied("configuration locked".to_string()));
         }
+        let dg = self.display_manager.acquire();
         self.connectivity_signals_enabled = enable;
         if enable {
-            match ddcutil::start_watch_displays() {
+            match dg.start_watch_displays() {
                 Ok(()) => debug!("Enabled libddcutil watch_displays."),
                 Err(e) => error!("Failed to enable libddcutil start_watch_displays: {:?}", e),
             }
         } else {
-            match ddcutil::start_watch_displays() {
+            match dg.start_watch_displays() {
                 Ok(()) => debug!("Disabled libddcutil watch_displays."),
                 Err(e) => error!("Failed to disable libddcutil watch_displays: {:?}", e),
             }
@@ -700,7 +717,7 @@ impl DdcCiDbusService {
 
     #[zbus(property)]
     fn service_poll_interval(&self) -> u32 {
-        self.polling.get_interval()
+        self.polling_controller.get_interval()
     }
 
     #[zbus(property)]
@@ -711,13 +728,13 @@ impl DdcCiDbusService {
         if seconds > 0 && seconds < 10 {
             return Err(FdoError::InvalidArgs("poll interval too small".to_string()));
         }
-        self.polling.set_interval(seconds);
+        self.polling_controller.set_interval(seconds);
         Ok(())
     }
 
     #[zbus(property)]
     fn service_poll_cascade_interval(&self) -> f64 {
-        self.polling.get_cascade_seconds()
+        self.polling_controller.get_cascade_seconds()
     }
 
     #[zbus(property)]
@@ -728,7 +745,7 @@ impl DdcCiDbusService {
         if seconds < 0.0 || (seconds > 0.0 && seconds < 1.0) {
             return Err(FdoError::InvalidArgs("poll cascade interval too small".to_string()));
         }
-        self.polling.set_cascade_seconds(seconds);
+        self.polling_controller.set_cascade_seconds(seconds);
         Ok(())}
 }
 
