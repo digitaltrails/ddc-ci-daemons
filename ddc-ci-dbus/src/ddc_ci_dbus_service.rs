@@ -94,11 +94,10 @@ impl DdcCiDbusService {
 
     pub fn serve_clients(self) -> zbus::Result<Connection> {
         // Blocking builder to bind and serve the interface
-        let result = connection::Builder::session()?
+        connection::Builder::session()?
             .name(Self::SERVICE_NAME)?
             .serve_at(Self::OBJECT_PATH, self)?
-            .build();
-        result
+            .build()
     }
 
     pub fn start_event_monitoring(&self) {
@@ -282,12 +281,12 @@ impl DdcCiDbusService {
             let dref = dg.find_display(
                 Option::Some(display_number.into()),
                 Option::Some(edid_txt),
-                flags & ServiceFlags::EdidPrefixAllowed as u32 as u32 != 0,
+                flags & ServiceFlags::EdidPrefixAllowed as u32 != 0,
             )?;
             let handle = dg.open_display(dref)?;
-            let want_raw_values = self.raw_values || flags & ServiceFlags::ReturnRawValues as u32 as u32 != 0;
+            let want_raw_values = self.raw_values || flags & ServiceFlags::ReturnRawValues as u32 != 0;
             let (current, max, formatted) = dg.get_vcp(&handle, vcp_code, want_raw_values)?;
-            Ok((current as u16, max as u16, formatted, 0, "OK".to_string()))
+            Ok((current, max, formatted, 0, "OK".to_string()))
         };
 
         match ddc_operation() {
@@ -311,12 +310,12 @@ impl DdcCiDbusService {
                 Option::Some(edid_txt),
                 flags & ServiceFlags::EdidPrefixAllowed as u32 != 0,
             )?;
-            let want_raw_values = self.raw_values || flags & ServiceFlags::ReturnRawValues as u32 as u32 != 0;
+            let want_raw_values = self.raw_values || flags & ServiceFlags::ReturnRawValues as u32 != 0;
             let handle = dg.open_display(dref)?;
             let mut values = Vec::new();
             for &code in vcp_codes {
-                let (current, max, formatted) = dg.get_vcp(&handle, code as u8, want_raw_values)?;
-                values.push((code, current as u16, max as u16, formatted));
+                let (current, max, formatted) = dg.get_vcp(&handle, code, want_raw_values)?;
+                values.push((code, current, max, formatted));
             }
             Ok((values, 0, "OK".to_string()))
         };
@@ -372,7 +371,7 @@ impl DdcCiDbusService {
                 flags & ServiceFlags::EdidPrefixAllowed as u32 != 0,
             )?;
             let handle = dg.open_display(dref)?;
-            dg.set_vcp(&handle, vcp_code as u8, vcp_new_value, flags & ServiceFlags::NoVerify as u32 != 0)?;
+            dg.set_vcp(&handle, vcp_code, vcp_new_value, flags & ServiceFlags::NoVerify as u32 != 0)?;
 
             let sender_str: String = hdr.sender()
                 .map(|name| name.to_string())
