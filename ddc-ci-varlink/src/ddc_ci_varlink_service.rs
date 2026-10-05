@@ -36,7 +36,7 @@ impl DdcCiVarlinkService {
         // Create event channel
         let (internal_event_sender, internal_event_receiver) = unbounded();
 
-        let display_manager = ddcutil::DisplayManager::new(internal_event_sender.clone()).expect("ddcutil::new failed");
+        let display_manager = DisplayManager::new(internal_event_sender.clone()).expect("ddcutil::new failed");
         let polling_controller = PollingController::new(display_manager.clone(), internal_event_sender.clone());
         let service = Self {
             display_manager,

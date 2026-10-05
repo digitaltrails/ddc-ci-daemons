@@ -96,7 +96,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         varlink::listen(
             varlink_service,
             "unix:",
-            &varlink::ListenConfig {
+            &ListenConfig {
                 idle_timeout: 600,
                 ..Default::default()
             },
@@ -116,7 +116,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         varlink::listen(
             varlink_service,
             &socket_address,
-            &varlink::ListenConfig {
+            &ListenConfig {
                 idle_timeout: 0,
                 ..Default::default()
             },

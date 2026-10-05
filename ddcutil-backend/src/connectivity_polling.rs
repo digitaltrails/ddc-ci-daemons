@@ -6,7 +6,7 @@
 //! (libddcutil does not handle DPMS and on some hardware cannot detect
 //! connectivity changes)
 
-use crate::{connectivity_polling, ddcutil};
+use crate::{ddcutil};
 use crate::ddcutil::{DisplayManager, DisplayRef, InternalEvent, InternalEventType};
 
 use base64::{engine::general_purpose, Engine as _};
@@ -52,7 +52,7 @@ impl PollingController {
         let internal_event_sender = self.event_sender.clone();
 
         let handle = thread::spawn(move || {
-            connectivity_polling::polling_loop(state_arc, display_manager, internal_event_sender, shutdown_listener);
+            polling_loop(state_arc, display_manager, internal_event_sender, shutdown_listener);
         });
 
         state.poll_thread = Some(handle);

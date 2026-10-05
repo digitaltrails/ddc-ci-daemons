@@ -20,7 +20,6 @@ use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
-use crate::ddcutil;
 
 // TODO: Could not find this - manually define for now
 const RCRANGE_DDC_START: i32 = 3000;
@@ -429,8 +428,8 @@ pub fn init() -> Result<()> {
     ));
     if log::log_enabled!(log::Level::Debug) {
         redetect().expect("initial redetect failed");
-        let display_info = ddcutil::list_displays(false);
-        for display_info in display_info.unwrap() {
+        let display_info = list_displays(false);
+        for display_info in display_info? {
             display_info.log_diagnostics();
         }
     }
@@ -481,7 +480,11 @@ impl DisplayManager {
         register_callback(Some(native_ddc_event_callback))?;
         let manager = Self { lock: Arc::new(Mutex::new(())) };
         // Store the sender globally for the native C callback
-        set_internal_event_sender(internal_event_sender.clone())?;
+        let sender = internal_event_sender.clone();
+        (match INTERNAL_EVENT_SENDER.set(sender).map_err(|_| ()) {
+            Ok(_) => Ok(()),
+            Err(_) => Err(Error::AlreadySetCallbackSender),
+        })?;
         Ok(manager)
     }
 
@@ -986,10 +989,10 @@ fn get_capabilities_data(handle: DisplayHandle) -> Result<CapabilitiesData> {
 fn get_status_values() -> HashMap<i32, String> {
     let mut rc_map: HashMap<i32, String> = HashMap::new();
     let mut i = RCRANGE_DDC_START + 1;
-    while unsafe { !ddcutil::ddca_rc_name(-i).is_null() } {
+    while unsafe { !ddca_rc_name(-i).is_null() } {
         let neg_i = -i;
         unsafe {
-            let c_str_ptr = ddcutil::ddca_rc_name(neg_i);
+            let c_str_ptr = ddca_rc_name(neg_i);
             let name_str = CStr::from_ptr(c_str_ptr)
                 .to_string_lossy()
                 .into_owned(); 
@@ -1053,13 +1056,6 @@ pub fn register_callback(
                 get_status_message(status)
             ),
         })
-    }
-}
-
-pub fn set_internal_event_sender(sender: Sender<InternalEvent>) -> Result<()> {
-    match INTERNAL_EVENT_SENDER.set(sender).map_err(|_| ()) {
-        Ok(_) => Ok(()),
-        Err(_) => Err(Error::AlreadySetCallbackSender),
     }
 }
 

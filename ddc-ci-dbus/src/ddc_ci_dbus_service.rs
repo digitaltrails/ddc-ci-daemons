@@ -3,7 +3,7 @@
 
 //! D-Bus interface to libddcutil.
 //! 
-//! The name Ddcu is an internal naming convention, deliberately
+//! The name DdcCi is an internal naming convention, deliberately
 //! different from ddcutil to help with delimiting internal code
 //! boundaries.
 
@@ -83,7 +83,7 @@ impl DdcCiDbusService {
         };
 
         // Register the native callback (C callback).
-        // Must run after init()/DisplayManager::new(). Calling it earlier leaves watching disabled 
+        // Must run after init()/DisplayManager::new(). Calling it earlier leaves watching disabled
         // and start_watch_displays fails with -3014.
         if let Err(status) = ddcutil::register_callback(Some(ddcutil::native_ddc_event_callback)) {
             error!("Failed to register ddcutil event callback: {:?}", status)
@@ -196,7 +196,7 @@ impl DdcCiDbusService {
                 let values: HashMap<u8, String> = feature
                     .values
                     .into_iter()
-                    .map(|val| (val.code as u8, val.name)) // Keep as u8 instead of formatting to String
+                    .map(|val| (val.code, val.name)) // Keep as u8 instead of formatting to String
                     .collect();
 
                 (
@@ -783,8 +783,7 @@ pub fn forward_events_as_signals(internal_event_receiver: Receiver<InternalEvent
 }
 
 fn error_code(e: &ddcutil::Error) -> i32 {
-    let code: i32 = e.status_code().try_into().unwrap_or(0);
-    return code;
+    e.status_code().try_into().unwrap_or(0)
 }
 
 fn error_message(prefix: &str, e: &ddcutil::Error) -> String {
