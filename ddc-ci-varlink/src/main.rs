@@ -93,7 +93,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        varlink::listen(
+        listen(
             varlink_service,
             "unix:",
             &ListenConfig {
@@ -113,7 +113,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
         warn!("LISTEN_FDS is not set. Running in manual mode.");
         info!("Listening on socket: {}", socket_address);
-        varlink::listen(
+        listen(
             varlink_service,
             &socket_address,
             &ListenConfig {

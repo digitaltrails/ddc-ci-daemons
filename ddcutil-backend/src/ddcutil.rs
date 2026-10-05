@@ -477,6 +477,9 @@ impl DisplayManager {
         if init().is_err() {
             error!("Failed to init ddcutil");
         }
+        // Register the native callback (C callback).
+        // Must run after init(). Calling it earlier leaves watching disabled
+        // and start_watch_displays fails with -3014.
         register_callback(Some(native_ddc_event_callback))?;
         let manager = Self { lock: Arc::new(Mutex::new(())) };
         // Store the sender globally for the native C callback

@@ -6,7 +6,7 @@
 
 use ddcutil_backend::ddcutil::InternalEvent;
 use crossbeam_channel::{Receiver, Sender};
-use log::{debug, info};
+use log::{info};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 
@@ -36,6 +36,7 @@ pub fn subscribe_to_internal_events(event_sender: Sender<InternalEvent>) -> usiz
             id,
             sender: event_sender,
         });
+        info!("Subscribed id={} added. ({} subscribers)", id, subscribers.len());
     }
     id
 }
@@ -44,17 +45,14 @@ pub fn subscribe_to_internal_events(event_sender: Sender<InternalEvent>) -> usiz
 pub fn unsubscribe_from_events(id: usize) {
     let mut subscribers = get_subscribers().lock().unwrap();
     subscribers.retain(|subscriber| subscriber.id != id);
+    info!("Unsubscribed id={} removed. ({} subscribers)", id, subscribers.len());
 }
 
 /// Take a single internal_event and dispatch a clone to all the subscribers.
 pub fn broadcast_to_subscribers(internal_event: InternalEvent) {
     info!("subscriber sending DDC event {:?}", internal_event);
     let mut subscribers = get_subscribers().lock().unwrap();
-    debug!(
-        "broadcast event: subscribers={} event={:?}",
-        subscribers.len(),
-        internal_event
-    );
+    info!("broadcast event: {:?} (subscribers={})",  internal_event, subscribers.len());
     // For each subscriber in subscribers send the event
     subscribers.retain(|subscriber| subscriber.sender.send(internal_event.clone()).is_ok());
 }

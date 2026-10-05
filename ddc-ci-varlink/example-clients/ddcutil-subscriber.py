@@ -51,8 +51,8 @@ def handle_event(event):
 
 
 def main():
-    service_address = f"unix:/run/user/{os.getuid()}/ddcutil-varlink.socket"
-    service_name = "com.ddcutil.DdcutilInterface"
+    service_address = f"unix:/run/user/{os.getuid()}/ddc-ci-varlink.socket"
+    service_name = "local.ddc-ci.service"
 
     print(f"📡 Subscribing to event stream at: {service_address}")
 

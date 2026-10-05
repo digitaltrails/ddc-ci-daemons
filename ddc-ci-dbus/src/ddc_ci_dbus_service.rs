@@ -82,13 +82,6 @@ impl DdcCiDbusService {
             raw_values: is_env_enabled("DDC_CI_SIMPLE_RAW_VALUES", true),
         };
 
-        // Register the native callback (C callback).
-        // Must run after init()/DisplayManager::new(). Calling it earlier leaves watching disabled
-        // and start_watch_displays fails with -3014.
-        if let Err(status) = ddcutil::register_callback(Some(ddcutil::native_ddc_event_callback)) {
-            error!("Failed to register ddcutil event callback: {:?}", status)
-        };
-
         (service, internal_event_receiver)
     }
 

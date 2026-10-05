@@ -479,6 +479,11 @@ impl VarlinkInterface for DdcCiVarlinkService {
     fn subscribe(&self, call: &mut dyn Call_Subscribe) -> varlink::Result<()> {
         debug_varlink_call!(call);
 
+        // Enable libddcutil events
+        let dg = self.display_manager.acquire();
+        dg.start_watch_displays()?;  // No harm if this is called multiple times.
+        drop(dg);
+
         // Each of these calls stays unfinished, looping/waiting for new events, and sending them.
 
         self.polling_controller.start();
