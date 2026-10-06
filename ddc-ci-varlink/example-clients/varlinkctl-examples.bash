@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Contributors to ddc-ci-daemons <https://github.com/digitaltrails/ddc-ci-daemons>
 # SPDX-License-Identifier: GPL-2.0-or-later
 
-SERVICE="unix:$XDG_RUNTIME_DIR/ddcutil-varlink.socket"
+SERVICE="unix:$XDG_RUNTIME_DIR/ddc-ci-varlink.socket"
 INTERFACE=local.ddc-ci.service
 
 varlinkctl list-methods $SERVICE

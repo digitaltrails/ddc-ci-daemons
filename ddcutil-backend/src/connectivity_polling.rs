@@ -17,18 +17,18 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+
+#[derive(Clone)]
 pub struct PollingController {
     state: Arc<Mutex<PollingSharedState>>,
-    display_manager: DisplayManager,
     event_sender: Sender<InternalEvent>,
 }
 
 impl PollingController {
 
-    pub fn new(display_manager: DisplayManager, event_sender: Sender<InternalEvent>) -> Self {
+    pub fn new(event_sender: Sender<InternalEvent>) -> Self {
         PollingController {
             state: Arc::new(Mutex::new(PollingSharedState::default())),
-            display_manager,
             event_sender,
         }
     }
@@ -37,7 +37,7 @@ impl PollingController {
         self.state.clone()
     }
 
-    pub fn start(&self) {
+    pub fn start(&self, display_manager: &DisplayManager,) {
         let mut state = self.state.lock().unwrap();
         if state.poll_thread.is_some() {
             debug!("Polling thread already running");
@@ -48,11 +48,11 @@ impl PollingController {
         let (shutdown_dispatcher, shutdown_listener) = unbounded();
 
         let state_arc = self.state.clone();
-        let display_manager = self.display_manager.clone();
+        let display_manager_clone = display_manager.clone();
         let internal_event_sender = self.event_sender.clone();
 
         let handle = thread::spawn(move || {
-            polling_loop(state_arc, display_manager, internal_event_sender, shutdown_listener);
+            polling_loop(state_arc, &display_manager_clone, internal_event_sender, shutdown_listener);
         });
 
         state.poll_thread = Some(handle);
@@ -153,7 +153,7 @@ struct DisplayState {
 /// The main polling loop. Runs in its own thread.
 pub fn polling_loop(
     state: Arc<Mutex<PollingSharedState>>,
-    display_manager: DisplayManager,
+    display_manager: &DisplayManager,
     internal_event_sender: Sender<InternalEvent>,
     shutdown_request_receiver: Receiver<()>,
 ) {

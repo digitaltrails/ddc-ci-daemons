@@ -20,6 +20,8 @@ use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
+use crate::connectivity_polling::PollingController;
+use crate::is_env_enabled;
 
 // TODO: Could not find this - manually define for now
 const RCRANGE_DDC_START: i32 = 3000;
@@ -468,6 +470,7 @@ fn get_display_info_list(include_invalid: bool) -> Result<Vec<DisplayInfo>> {
 #[derive(Clone)]
 pub struct DisplayManager {
     lock: Arc<Mutex<()>>,
+    pub polling_controller: Arc<PollingController>,
 }
 
 
@@ -481,19 +484,56 @@ impl DisplayManager {
         // Must run after init(). Calling it earlier leaves watching disabled
         // and start_watch_displays fails with -3014.
         register_callback(Some(native_ddc_event_callback))?;
-        let manager = Self { lock: Arc::new(Mutex::new(())) };
+        let manager = Self {
+            lock: Arc::new(Mutex::new(())),
+            polling_controller: Arc::from(PollingController::new(internal_event_sender.clone())),
+        };
         // Store the sender globally for the native C callback
         let sender = internal_event_sender.clone();
         (match INTERNAL_EVENT_SENDER.set(sender).map_err(|_| ()) {
             Ok(_) => Ok(()),
             Err(_) => Err(Error::AlreadySetCallbackSender),
         })?;
+
         Ok(manager)
     }
 
     pub fn acquire(&self) -> DisplayGuard<'_> {
         DisplayGuard { _g: self.lock.lock().unwrap() }
     }
+
+    pub fn start_event_monitoring(&self) {
+        let dg = self.acquire();
+        if is_env_enabled("DDC_CI_WATCH_DISPLAYS", true) {
+
+            match dg.start_watch_displays() {
+                Ok(()) => info!("Enabled libddcutil watch_displays."),
+                Err(e) => error!("Failed to enable libddcutil watch_displays, continuing anyway: {:?}", e),
+            }
+        }
+        if is_env_enabled("DDC_CI_POLL_DISPLAYS", true) {
+            self.polling_controller.enable_events();
+            debug!("DDC_CI_POLL_DISPLAYS enabled");
+            self.polling_controller.start(&self)
+        }
+    }
+
+    pub fn get_polling_interval(&self) -> u32 {
+        self.polling_controller.get_interval()
+    }
+    
+    pub fn set_polling_interval(&self, interval: u32) {
+        self.polling_controller.set_interval(interval);
+    }
+
+    pub fn get_polling_cascade_seconds(&self) -> f64 {
+        self.polling_controller.get_cascade_seconds()
+    }
+    
+    pub fn set_polling_cascade_seconds(&self, cascade_seconds: f64) {
+        self.polling_controller.set_cascade_seconds(cascade_seconds);
+    }
+
 }
 
 pub struct DisplayGuard<'lock> {  // lifetime lock to hold while performing ddcutil op's.

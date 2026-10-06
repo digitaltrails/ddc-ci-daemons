@@ -211,7 +211,7 @@ impl VarlinkInterface for DdcCiVarlinkService {
         debug_varlink_call!(call);
         // No lock needed for a simple read – but we acquire it anyway for consistency
         //let _lock = self.state.lock().unwrap();
-        call.reply(self.polling_controller.get_cascade_seconds())
+        call.reply(self.display_manager.polling_controller.get_cascade_seconds())
     }
 
     fn get_service_poll_interval(
@@ -220,7 +220,7 @@ impl VarlinkInterface for DdcCiVarlinkService {
     ) -> varlink::Result<()> {
         debug_varlink_call!(call);
         //let _lock = self.state.lock().unwrap();
-        call.reply(self.polling_controller.get_interval() as i64)
+        call.reply(self.display_manager.polling_controller.get_interval() as i64)
     }
 
     fn get_sleep_multiplier(
@@ -373,7 +373,7 @@ impl VarlinkInterface for DdcCiVarlinkService {
             );
         }
         //let _lock = self.state.lock().unwrap();
-        self.polling_controller.set_cascade_seconds(seconds);
+        self.display_manager.polling_controller.set_cascade_seconds(seconds);
         call.reply()
     }
 
@@ -394,7 +394,7 @@ impl VarlinkInterface for DdcCiVarlinkService {
             );
         }
         //let _lock = self.state.lock().unwrap();
-        self.polling_controller.set_interval(seconds as u32);
+        self.display_manager.polling_controller.set_interval(seconds as u32);
         call.reply()
     }
 
@@ -480,16 +480,7 @@ impl VarlinkInterface for DdcCiVarlinkService {
         debug_varlink_call!(call);
 
         // Enable libddcutil events
-        let dg = self.display_manager.acquire();
-        dg.start_watch_displays()?;  // No harm if this is called multiple times.
-        drop(dg);
-
-        // Each of these calls stays unfinished, looping/waiting for new events, and sending them.
-
-        self.polling_controller.start();
-
-        // Enable events (this also starts/stop native watch)
-        self.polling_controller.enable_events();
+        self.display_manager.start_event_monitoring();
 
         // Tell the client we're going to stream multiple events
         call.set_continues(true);
@@ -519,6 +510,8 @@ impl VarlinkInterface for DdcCiVarlinkService {
         while let Ok(internal_event) = subscriber_internal_receiver.recv() {
             // Convert from internal event to external event and send.
             if let Some(varlink_event) = convert_internal_event(internal_event) {
+                // Tell the client there's more after this one
+                call.set_continues(true);
                 if call.reply(varlink_event).is_err() {
                     // Client disconnected
                     break;

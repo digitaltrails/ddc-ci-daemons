@@ -10,7 +10,6 @@
 use base64::Engine;
 use base64::engine::general_purpose;
 use crossbeam_channel::{Receiver, unbounded};
-use ddcutil_backend::connectivity_polling::{PollingController};
 use ddcutil_backend::ddcutil::{CapabilitiesData, InternalEvent, VcpFeatureMetadata, extract_edid_base64};
 use ddcutil_backend::{ddcutil, is_env_enabled};
 use log::{LevelFilter, debug, error, info};
@@ -45,7 +44,6 @@ pub enum DdcCiDbusDisplayEventType {
 /// The main service object. Holds all state and (eventually).
 pub struct DdcCiDbusService {
     pub(crate) display_manager: ddcutil::DisplayManager,
-    pub(crate) polling_controller: PollingController,
     pub(crate) parameters_locked: bool,
     pub(crate) connectivity_signals_enabled: bool,
     /// Callers can elect to drop the high byte of simple non-continuous types.
@@ -55,7 +53,7 @@ pub struct DdcCiDbusService {
 }
 
 
-// ── Private helpers (not part of the D-Bus interface) ──────────────
+// ── helpers (not part of the D-Bus interface) ──────────────
 impl DdcCiDbusService {
 
     /// Well-known bus name this service requests.
@@ -73,10 +71,8 @@ impl DdcCiDbusService {
         let (internal_event_sender, internal_event_receiver) = unbounded();
 
         let display_manager = ddcutil::DisplayManager::new(internal_event_sender.clone()).expect("dg.new failed");
-        let polling_controller = PollingController::new(display_manager.clone(), internal_event_sender.clone());
         let service = Self {
             display_manager,
-            polling_controller,
             parameters_locked: is_env_enabled("DDC_CI_PARAMETERS_LOCKED", false),
             connectivity_signals_enabled: is_env_enabled("DDC_CI_CONNECTIVITY_SIGNALS", true),
             raw_values: is_env_enabled("DDC_CI_SIMPLE_RAW_VALUES", true),
@@ -85,28 +81,16 @@ impl DdcCiDbusService {
         (service, internal_event_receiver)
     }
 
+    pub fn start_event_monitoring(&self) {
+        self.display_manager.start_event_monitoring()
+    }
+
     pub fn serve_clients(self) -> zbus::Result<Connection> {
         // Blocking builder to bind and serve the interface
         connection::Builder::session()?
             .name(Self::SERVICE_NAME)?
             .serve_at(Self::OBJECT_PATH, self)?
             .build()
-    }
-
-    pub fn start_event_monitoring(&self) {
-        let dg = self.display_manager.acquire();
-        if is_env_enabled("DDC_CI_WATCH_DISPLAYS", true) {
-
-            match dg.start_watch_displays() {
-                Ok(()) => info!("Enabled libddcutil watch_displays."),
-                Err(e) => error!("Failed to enable libddcutil watch_displays, continuing anyway: {:?}", e),
-            }
-        }
-        if is_env_enabled("DDC_CI_POLL_DISPLAYS", true) {
-            self.polling_controller.enable_events();
-            debug!("DDC_CI_POLL_DISPLAYS enabled");
-            self.polling_controller.start()
-        }
     }
 
     /// Shared body for `detect` and `list_detected`.
@@ -709,7 +693,7 @@ impl DdcCiDbusService {
 
     #[zbus(property)]
     fn service_poll_interval(&self) -> u32 {
-        self.polling_controller.get_interval()
+        self.display_manager.get_polling_interval()
     }
 
     #[zbus(property)]
@@ -720,13 +704,13 @@ impl DdcCiDbusService {
         if seconds > 0 && seconds < 10 {
             return Err(FdoError::InvalidArgs("poll interval too small".to_string()));
         }
-        self.polling_controller.set_interval(seconds);
+        self.display_manager.set_polling_interval(seconds);
         Ok(())
     }
 
     #[zbus(property)]
     fn service_poll_cascade_interval(&self) -> f64 {
-        self.polling_controller.get_cascade_seconds()
+        self.display_manager.get_polling_cascade_seconds()
     }
 
     #[zbus(property)]
@@ -737,7 +721,7 @@ impl DdcCiDbusService {
         if seconds < 0.0 || (seconds > 0.0 && seconds < 1.0) {
             return Err(FdoError::InvalidArgs("poll cascade interval too small".to_string()));
         }
-        self.polling_controller.set_cascade_seconds(seconds);
+        self.display_manager.set_polling_cascade_seconds(seconds);
         Ok(())}
 }
 
