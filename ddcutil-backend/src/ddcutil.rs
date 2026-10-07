@@ -13,7 +13,7 @@ use crossbeam_channel::Sender;
 use log::{debug, error, info, warn};
 use regex::Regex;
 use scopeguard::guard;
-use serde_derive::{Deserialize, Serialize};
+use serde_derive::{Serialize};
 use std::ffi::CStr;
 use std::os::raw::{c_char, c_int};
 use std::ptr;
@@ -21,7 +21,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 use crate::connectivity_polling::PollingController;
-use crate::{ddcutil, is_env_enabled};
+use crate::{is_env_enabled};
+use crate::ddcutil::InternalEventType::Connected;
 
 // TODO: Could not find this - manually define for now
 const RCRANGE_DDC_START: i32 = 3000;
@@ -203,7 +204,7 @@ impl From<&DDCA_Display_Info> for DisplayInfo {
 
 /// Overall kind of event - categorization for varlink event kind.
 #[derive(Debug, Clone, Serialize, PartialEq)]
-pub enum InternalEventKind {
+pub enum InternalEventClass {  // TODO - this seems unnecessary - see if that's true.
     VcpChange,
     ConnectedDisplaysChanged,
 }
@@ -230,13 +231,6 @@ impl InternalEventType {
             Self::Unknown(_) => "Unknown",
         }
     }
-}
-
-#[derive(Debug, Serialize, Clone)]
-pub struct InternalEvent {
-    pub kind: InternalEventKind,
-    pub data: String,
-    // optionally: io_path, flags, etc.
 }
 
 pub struct DisplayList {
@@ -825,7 +819,7 @@ fn set_vcp(handle: &DisplayHandle, vcp_code: u8, value: u16, verify: bool, clien
         low
     ));
 
-    let internal_event = ddcutil::build_set_vcp_event(
+    let internal_event = build_set_vcp_event(
         handle.dref, vcp_code, value, client_context,
     );
     // Send to the channel
@@ -1136,6 +1130,44 @@ extern "C" fn native_ddc_event_callback(native_event: DDCA_Display_Status_Event)
 // Event helpers
 // ============================================================================
 
+#[derive(Debug, Clone)]
+pub struct VcpEventData {
+    pub internal_event_type: String,  // TODO maybe this field belongs in InternalEvent along with origin??
+    pub display_number: i32,
+    pub edid_base64: String,
+    pub vcp_code: u8,
+    pub new_value: u16,
+    pub client_context: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ConnectEventData {
+    pub internal_event_type: String,
+    pub edid_base64: String,
+    pub ddcutil_event_type: i32,
+    pub flags: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct DpmsEventData {
+    pub internal_event_type: String,
+    pub edid_base64: String,
+    pub awake: bool,
+    pub flags: u32,
+}
+
+#[derive(Debug, Clone)]
+pub enum InternalEventPayload {
+    VcpChange(VcpEventData),
+    DisplayConnection(ConnectEventData),
+    DpmsChange(DpmsEventData),
+}
+
+#[derive(Debug, Clone)]
+pub struct InternalEvent {
+    pub origin: String,
+    pub payload: InternalEventPayload,
+}
 fn build_event_from_ddca_event(event: DDCA_Display_Status_Event) -> InternalEvent {
     // Map the C event type to our Rust enum
     #[allow(non_upper_case_globals)]
@@ -1162,7 +1194,7 @@ fn build_event_from_ddca_event(event: DDCA_Display_Status_Event) -> InternalEven
     let mut info_ptr: *mut DDCA_Display_Info = ptr::null_mut();
     let status = unsafe { ddca_get_display_info(event.dref, &mut info_ptr) };
     // Info may no longer be available if the display disconnected.
-    let edid = if status == 0 {
+    let edid_base64 = if status == 0 {
         let edid_bytes = unsafe {(*info_ptr).edid_bytes};
         let edid_base64 =general_purpose::STANDARD.encode(edid_bytes);
         unsafe { ddca_free_display_info(info_ptr); }
@@ -1172,22 +1204,24 @@ fn build_event_from_ddca_event(event: DDCA_Display_Status_Event) -> InternalEven
         "".to_string()
     };
 
-    let data = serde_json::json!({
-                "edid_base64": edid,
-                "event_type": internal_event_type.as_str(),
-                "origin": "libddcutil",
-                "ddcutil_event_type": event.event_type,
-                "flags": 0, })
-        .to_string();
+    let payload = InternalEventPayload::DisplayConnection(ConnectEventData {
+        internal_event_type: internal_event_type.as_str().to_owned(),
+        edid_base64,
+        ddcutil_event_type: event.event_type as i32,
+        flags: 0
+    });
 
-    InternalEvent { kind: InternalEventKind::ConnectedDisplaysChanged, data }
+    InternalEvent {
+        origin: "libddcutil".to_string(),
+        payload
+    }
 }
 
 fn build_set_vcp_event(dref: DisplayRef, vcp_code: u8, new_value: u16, client_context: &str) -> InternalEvent {
     let mut info_ptr: *mut DDCA_Display_Info = ptr::null_mut();
     let status = unsafe { ddca_get_display_info(dref as DDCA_Display_Ref, &mut info_ptr) };
     // Info may no longer be available if the display disconnected.
-    let (edid, display_number) = if status == 0 {
+    let (edid_base64, display_number) = if status == 0 {
         let edid_bytes = unsafe {(*info_ptr).edid_bytes};
         let edid_base64 =general_purpose::STANDARD.encode(edid_bytes);
         let display_number = unsafe {(*info_ptr).dispno};
@@ -1197,41 +1231,21 @@ fn build_set_vcp_event(dref: DisplayRef, vcp_code: u8, new_value: u16, client_co
     else {
         ("".to_string(), -99)
     };
-    let data = serde_json::json!({
-        "event_type": InternalEventType::VcpChange.as_str(),
-                                 "origin": "ddc-ci",
-                                 "display_number": display_number,
-                                 "edid_base64": edid,
-                                 "vcp_code": vcp_code,
-                                 "new_value": new_value,
-                                 "client_context": client_context,
-    }).to_string();
 
-    InternalEvent { kind: InternalEventKind::VcpChange, data }
-}
+    let data = VcpEventData {
+        internal_event_type: InternalEventType::VcpChange.as_str().to_string(),
+        display_number,
+        edid_base64,
+        vcp_code,
+        new_value,
+        client_context: client_context.to_string(),
+    };
 
-/// Builds a VCP Changed event.
-pub fn build_vcp_changed_event(
-    display_number: Option<i64>,
-    edid_base64: Option<&str>,
-    vcp_code: i64,
-    new_value: i64,
-    client_context: String,
-) -> InternalEvent {
-    let data = serde_json::json!({
-        "event_type": InternalEventType::VcpChange.as_str(),
-                                 "origin": "ddcutil-varlink",  // for now this is the only origin for set vcp
-                                 "display_number": display_number,
-                                 "edid_base64": edid_base64,
-                                 "vcp_code": vcp_code,
-                                 "new_value": new_value,
-                                 "client_context": client_context,
-    })
-    .to_string();
+    let payload = InternalEventPayload::VcpChange(data);
 
     InternalEvent {
-        kind: InternalEventKind::VcpChange,
-        data,
+        origin: "ddc-ci".to_string(),
+        payload
     }
 }
 
@@ -1267,53 +1281,49 @@ fn extract_model(ptr: *const c_char) -> Option<String> {
 
 /// Builds an envent for a hotplug connect or disconnect.
 /// The edit_base64 may be empty for a disconnect (no longer available).
-pub fn build_hotplug_event(edid: &String, event_type: InternalEventType) -> InternalEvent {
-    let data = serde_json::json!({
-        "edid_base64": edid,
-        "event_type": event_type.as_str(),
-                                 "origin": "polling",
-                                 "flags": 0,
-    }).to_string();
+pub fn build_hotplug_event(edid_base64: &String, event_type: InternalEventType) -> InternalEvent {
+
+    let ddcutil_event_type = if event_type == Connected {
+        DDCA_Display_Event_Type_DDCA_EVENT_DISPLAY_CONNECTED
+    }
+    else {
+        DDCA_Display_Event_Type_DDCA_EVENT_DISPLAY_DISCONNECTED
+    };
+
+    let data = ConnectEventData {
+        internal_event_type: event_type.as_str().to_string(),
+        edid_base64: edid_base64.to_string(),
+        ddcutil_event_type: ddcutil_event_type as i32,
+        flags: 0,
+    };
+
+    let payload = InternalEventPayload::DisplayConnection(data);
+
     InternalEvent {
-        kind: InternalEventKind::ConnectedDisplaysChanged,
-        data,
+        origin: "polling".to_string(),
+        payload,
     }
 }
 
 /// Builds an event for DPMS awake or asleep.
 pub fn build_dpms_event(edid: &String, event_type: InternalEventType) -> InternalEvent {
-    let data = serde_json::json!({
-        "event_type": event_type.as_str(),
-                                 "origin": "polling",
-                                 "edid_base64": edid,
-                                 "awake": InternalEventType::DpmsAwake == event_type,
-                                 "flags": 0,
-    })
-    .to_string();
-    InternalEvent { kind: InternalEventKind::ConnectedDisplaysChanged, data }
-}
 
-pub fn extract_edid_base64(internal_event: &InternalEvent) -> String {
-    match serde_json::from_str::<serde_json::Value>(&internal_event.data) {
-        Ok(value) => value["edid_base64"].as_str().unwrap_or("").to_string(),
-        Err(_) => String::new(),
+    let data = DpmsEventData {
+        internal_event_type: event_type.as_str().to_string(),
+        edid_base64: edid.to_string(),
+        awake: InternalEventType::DpmsAwake == event_type,
+        flags: 0,
+    };
+
+    let payload = InternalEventPayload::DpmsChange(data);
+
+    InternalEvent {
+        origin: "polling".to_string(),
+        payload
     }
 }
 
-#[derive(Deserialize, Debug)]
-pub struct SetVcpEventData {
-    pub origin: String,
-    pub display_number: i32,
-    pub edid_base64: String,
-    pub vcp_code: u8,
-    pub new_value: u16,
-    pub client_context: String,
-}
 
-pub fn extract_set_vcp_data(internal_event: &InternalEvent) -> SetVcpEventData {
-    let event: SetVcpEventData = serde_json::from_str(&*internal_event.data).unwrap();
-    event
-}
 
 /// Converts a nullable C string pointer to a Rust `String`.
 /// If the pointer is null, returns the provided default (which can be a `&str` or `String`).
