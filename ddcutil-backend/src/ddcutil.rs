@@ -13,7 +13,7 @@ use crossbeam_channel::Sender;
 use log::{debug, error, info, warn};
 use regex::Regex;
 use scopeguard::guard;
-use serde_derive::Serialize;
+use serde_derive::{Deserialize, Serialize};
 use std::ffi::CStr;
 use std::os::raw::{c_char, c_int};
 use std::ptr;
@@ -21,7 +21,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 use crate::connectivity_polling::PollingController;
-use crate::is_env_enabled;
+use crate::{ddcutil, is_env_enabled};
 
 // TODO: Could not find this - manually define for now
 const RCRANGE_DDC_START: i32 = 3000;
@@ -184,10 +184,6 @@ pub struct ValueData {
     pub name: String,
 }
 
-pub fn edid_serial_number(edid: &[u8; 128]) -> u32 {
-    u32::from_le_bytes([edid[0x0c], edid[0x0d], edid[0x0e], edid[0x0f]])
-}
-
 impl From<&DDCA_Display_Info> for DisplayInfo {
     fn from(raw: &DDCA_Display_Info) -> Self {
         Self {
@@ -206,7 +202,7 @@ impl From<&DDCA_Display_Info> for DisplayInfo {
 }
 
 /// Overall kind of event - categorization for varlink event kind.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 pub enum InternalEventKind {
     VcpChange,
     ConnectedDisplaysChanged,
@@ -241,17 +237,6 @@ pub struct InternalEvent {
     pub kind: InternalEventKind,
     pub data: String,
     // optionally: io_path, flags, etc.
-}
-
-fn list_displays(include_invalid: bool) -> Result<Vec<DisplayInfo>> {
-    let list = DisplayList::new(include_invalid)?;
-    let mut result = Vec::with_capacity(list.len());
-
-    for raw in list.iter() {
-        let info = DisplayInfo::from(raw);
-        result.push(info);
-    }
-    Ok(result)
 }
 
 pub struct DisplayList {
@@ -387,62 +372,6 @@ impl<'a> Iterator for DisplayListIter<'a> {
 
 /// Get a human‑readable message for a DDCA_Status code,
 /// including any additional error detail from libddcutil.
-pub fn get_status_message(status: i32) -> String {
-    // Get the base status name (e.g., "DDCRC_OK", "DDCRC_RETRIES")
-    let name_ptr = unsafe { ddca_rc_name(status) };
-    let name = c_ptr_to_string(name_ptr, format!("Unknown error code {}", status));
-
-    // If status is OK, return just the name
-    if status == 0 {
-        return name;
-    }
-
-    let desc_ptr = unsafe { ddca_rc_desc(status) };
-    let desc = c_ptr_to_string(desc_ptr, "");
-
-    let detail_ptr = unsafe { ddca_get_error_detail() };
-
-    let _guard_details_ptr = guard(detail_ptr, |ptr| {
-        if !ptr.is_null() {
-            unsafe { ddca_free_error_detail(ptr) };
-        }
-    });
-
-    let detail_str = if detail_ptr.is_null() {
-        "no details".to_owned()
-    } else {
-        let error_detail = unsafe { &*detail_ptr };
-        c_ptr_to_string(error_detail.detail, "")
-    };
-
-    let message = format!("{}: {}: {}", name, desc, detail_str);
-
-    //debug!("Message {}", message);
-    message
-}
-
-pub fn init() -> Result<()> {
-    info!("Initializing ddcutil");
-    let result = ddca_call!(ddca_init(
-        ptr::null(), // no options string
-        9,           // LOG_NOTICE
-        0
-    ));
-    if log::log_enabled!(log::Level::Debug) {
-        redetect().expect("initial redetect failed");
-        let display_info = list_displays(false);
-        for display_info in display_info? {
-            display_info.log_diagnostics();
-        }
-    }
-    result
-}
-
-fn redetect() -> Result<()> {
-    debug!("Redetect displays");
-    ddca_call!(ddca_redetect_displays())
-}
-
 fn get_display_info_list(include_invalid: bool) -> Result<Vec<DisplayInfo>> {
     let mut list_ptr = ptr::null_mut();
 
@@ -600,8 +529,8 @@ impl DisplayGuard<'_> {
         get_vcp_metadata(handle, feature_code)
     }
 
-    pub fn set_vcp(&self, handle: &DisplayHandle, vcp_code: u8, value: u16, verify: bool) -> Result<()> {
-        set_vcp(handle, vcp_code, value, verify)
+    pub fn set_vcp(&self, handle: &DisplayHandle, vcp_code: u8, value: u16, verify: bool, client_context: &str) -> Result<()> {
+        set_vcp(handle, vcp_code, value, verify, client_context)
     }
 
     pub fn get_sleep_multiplier(&self, dref: DisplayRef) -> Result<f64> {
@@ -646,6 +575,38 @@ impl DisplayGuard<'_> {
 
 }
 
+pub fn init() -> Result<()> {
+    info!("Initializing ddcutil");
+    let result = ddca_call!(ddca_init(
+        ptr::null(), // no options string
+        9,           // LOG_NOTICE
+        0
+    ));
+    if log::log_enabled!(log::Level::Debug) {
+        redetect().expect("initial redetect failed");
+        let display_info = list_displays(false);
+        for display_info in display_info? {
+            display_info.log_diagnostics();
+        }
+    }
+    result
+}
+
+fn list_displays(include_invalid: bool) -> Result<Vec<DisplayInfo>> {
+    let list = DisplayList::new(include_invalid)?;
+    let mut result = Vec::with_capacity(list.len());
+
+    for raw in list.iter() {
+        let info = DisplayInfo::from(raw);
+        result.push(info);
+    }
+    Ok(result)
+}
+
+fn redetect() -> Result<()> {
+    debug!("Redetect displays");
+    ddca_call!(ddca_redetect_displays())
+}
 
 /// Find a display by number or EDID, returning the raw dref and the DisplayList
 /// that keeps it alive. The caller must hold onto the DisplayList for the
@@ -845,7 +806,7 @@ fn get_vcp_metadata(handle: &DisplayHandle, feature_code: i64) -> Result<VcpFeat
     Ok(result)
 }
 
-fn set_vcp(handle: &DisplayHandle, vcp_code: u8, value: u16, verify: bool) -> Result<()> {
+fn set_vcp(handle: &DisplayHandle, vcp_code: u8, value: u16, verify: bool, client_context: &str) -> Result<()> {
     if !verify {
         debug!("set_vcp: non-verified set.")
     }
@@ -857,12 +818,26 @@ fn set_vcp(handle: &DisplayHandle, vcp_code: u8, value: u16, verify: bool) -> Re
     let high = (value >> 8) as u8;
     let low = value as u8;
 
-    ddca_call!(ddca_set_non_table_vcp_value(
+    let result = ddca_call!(ddca_set_non_table_vcp_value(
         handle.ddca_handle,
         vcp_code,
         high,
         low
-    ))
+    ));
+
+    let internal_event = ddcutil::build_set_vcp_event(
+        handle.dref, vcp_code, value, client_context,
+    );
+    // Send to the channel
+    if let Some(sender) = INTERNAL_EVENT_SENDER.get() {
+        info!("set_vcp: sending event {:?}", internal_event);
+        let _ = sender.send(internal_event);
+    }
+    else {
+        error!("set_vcp: cannot send event: internal event sender not set.");
+    }
+
+    result
 }
 
 fn get_sleep_multiplier(dref: DisplayRef) -> Result<f64> {
@@ -1085,7 +1060,7 @@ fn set_output_level(level: u32) -> u32 {
 
 /// Register the native callback with libddcutil.
 /// This must be called once before any events can be received.
-pub fn register_callback(
+fn register_callback(
     callback: Option<unsafe extern "C" fn(DDCA_Display_Status_Event)>,
 ) -> Result<()> {
     let status = unsafe { ddca_register_display_status_callback(callback) };
@@ -1102,8 +1077,46 @@ pub fn register_callback(
     }
 }
 
+pub fn edid_serial_number(edid: &[u8; 128]) -> u32 {
+    u32::from_le_bytes([edid[0x0c], edid[0x0d], edid[0x0e], edid[0x0f]])
+}
+
+pub fn get_status_message(status: i32) -> String {
+    // Get the base status name (e.g., "DDCRC_OK", "DDCRC_RETRIES")
+    let name_ptr = unsafe { ddca_rc_name(status) };
+    let name = c_ptr_to_string(name_ptr, format!("Unknown error code {}", status));
+
+    // If status is OK, return just the name
+    if status == 0 {
+        return name;
+    }
+
+    let desc_ptr = unsafe { ddca_rc_desc(status) };
+    let desc = c_ptr_to_string(desc_ptr, "");
+
+    let detail_ptr = unsafe { ddca_get_error_detail() };
+
+    let _guard_details_ptr = guard(detail_ptr, |ptr| {
+        if !ptr.is_null() {
+            unsafe { ddca_free_error_detail(ptr) };
+        }
+    });
+
+    let detail_str = if detail_ptr.is_null() {
+        "no details".to_owned()
+    } else {
+        let error_detail = unsafe { &*detail_ptr };
+        c_ptr_to_string(error_detail.detail, "")
+    };
+
+    let message = format!("{}: {}: {}", name, desc, detail_str);
+
+    //debug!("Message {}", message);
+    message
+}
+
 /// Event c Callback for passing to libddcutil
-pub extern "C" fn native_ddc_event_callback(native_event: DDCA_Display_Status_Event) {
+extern "C" fn native_ddc_event_callback(native_event: DDCA_Display_Status_Event) {
     info!("native_ddc_event_callback: libddcutil-event {}", native_event.event_type);
 
     let internal_event = build_event_from_ddca_event(native_event);  // side effect sets NEED_POLL
@@ -1168,6 +1181,33 @@ fn build_event_from_ddca_event(event: DDCA_Display_Status_Event) -> InternalEven
         .to_string();
 
     InternalEvent { kind: InternalEventKind::ConnectedDisplaysChanged, data }
+}
+
+fn build_set_vcp_event(dref: DisplayRef, vcp_code: u8, new_value: u16, client_context: &str) -> InternalEvent {
+    let mut info_ptr: *mut DDCA_Display_Info = ptr::null_mut();
+    let status = unsafe { ddca_get_display_info(dref as DDCA_Display_Ref, &mut info_ptr) };
+    // Info may no longer be available if the display disconnected.
+    let (edid, display_number) = if status == 0 {
+        let edid_bytes = unsafe {(*info_ptr).edid_bytes};
+        let edid_base64 =general_purpose::STANDARD.encode(edid_bytes);
+        let display_number = unsafe {(*info_ptr).dispno};
+        unsafe { ddca_free_display_info(info_ptr); }
+        (edid_base64, display_number)
+    }
+    else {
+        ("".to_string(), -99)
+    };
+    let data = serde_json::json!({
+        "event_type": InternalEventType::VcpChange.as_str(),
+                                 "origin": "ddc-ci",
+                                 "display_number": display_number,
+                                 "edid_base64": edid,
+                                 "vcp_code": vcp_code,
+                                 "new_value": new_value,
+                                 "client_context": client_context,
+    }).to_string();
+
+    InternalEvent { kind: InternalEventKind::VcpChange, data }
 }
 
 /// Builds a VCP Changed event.
@@ -1258,6 +1298,21 @@ pub fn extract_edid_base64(internal_event: &InternalEvent) -> String {
         Ok(value) => value["edid_base64"].as_str().unwrap_or("").to_string(),
         Err(_) => String::new(),
     }
+}
+
+#[derive(Deserialize, Debug)]
+pub struct SetVcpEventData {
+    pub origin: String,
+    pub display_number: i32,
+    pub edid_base64: String,
+    pub vcp_code: u8,
+    pub new_value: u16,
+    pub client_context: String,
+}
+
+pub fn extract_set_vcp_data(internal_event: &InternalEvent) -> SetVcpEventData {
+    let event: SetVcpEventData = serde_json::from_str(&*internal_event.data).unwrap();
+    event
 }
 
 /// Converts a nullable C string pointer to a Rust `String`.

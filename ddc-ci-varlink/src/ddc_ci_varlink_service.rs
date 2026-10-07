@@ -4,7 +4,7 @@
 //! DdcCiVarlinkService – service implementation
 
 use ddcutil_backend::ddcutil::{DisplayManager, InternalEvent};
-use ddcutil_backend::{ddcutil, is_env_enabled};
+use ddcutil_backend::{is_env_enabled};
 use crate::ddc_ci_varlink_subscribers;
 use crossbeam_channel::{unbounded, Sender};
 use log::{info};
@@ -64,21 +64,5 @@ impl DdcCiVarlinkService {
         ddc_ci_varlink_subscribers::unsubscribe_from_events(id)
     }
 
-    pub fn broadcast_set_vcp(
-        display_number: Option<i64>,
-        edid_base64: Option<&str>,
-        vcp_code: i64,
-        new_value: i64,
-        client_context: Option<String>,
-    ) {
-        let internal_event = ddcutil::build_vcp_changed_event(
-            display_number,
-            edid_base64,
-            vcp_code,
-            new_value,
-            client_context.unwrap_or_default(),
-        );
-        ddc_ci_varlink_subscribers::broadcast_to_subscribers(internal_event);
-    }
 }
 

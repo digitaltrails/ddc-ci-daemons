@@ -457,17 +457,7 @@ impl VarlinkInterface for DdcCiVarlinkService {
             let handle = dg.open_display(dref)?;
             let verify = is_setvcp_verifying(&options);
 
-            dg.set_vcp(&handle, vcp_code as u8, new_value as u16, verify)?;
-
-            Self::broadcast_set_vcp(
-                display_number,
-                edid_base64.as_deref(),
-                vcp_code,
-                new_value,
-                client_context,
-            );
-
-            Ok(())
+            dg.set_vcp(&handle, vcp_code as u8, new_value as u16, verify, &*client_context.unwrap_or_default())
         };
 
         match ddc_operation() {
