@@ -364,8 +364,6 @@ impl<'a> Iterator for DisplayListIter<'a> {
     }
 }
 
-/// Get a human‑readable message for a DDCA_Status code,
-/// including any additional error detail from libddcutil.
 fn get_display_info_list(include_invalid: bool) -> Result<Vec<DisplayInfo>> {
     let mut list_ptr = ptr::null_mut();
 
@@ -1075,6 +1073,8 @@ pub fn edid_serial_number(edid: &[u8; 128]) -> u32 {
     u32::from_le_bytes([edid[0x0c], edid[0x0d], edid[0x0e], edid[0x0f]])
 }
 
+/// Get a human‑readable message for a DDCA_Status code,
+/// including any additional error detail from libddcutil.
 pub fn get_status_message(status: i32) -> String {
     // Get the base status name (e.g., "DDCRC_OK", "DDCRC_RETRIES")
     let name_ptr = unsafe { ddca_rc_name(status) };
