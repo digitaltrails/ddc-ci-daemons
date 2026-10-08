@@ -50,9 +50,8 @@ pub fn unsubscribe_from_events(id: usize) {
 
 /// Take a single internal_event and dispatch a clone to all the subscribers.
 pub fn broadcast_to_subscribers(internal_event: InternalEvent) {
-    info!("subscriber sending DDC event {:?}", internal_event);
     let mut subscribers = get_subscribers().lock().unwrap();
-    info!("broadcast event: {:?} (subscribers={})",  internal_event, subscribers.len());
+    info!("broadcast event to {} subscribers: {:?} ", subscribers.len(), internal_event);
     // For each subscriber in subscribers send the event
     subscribers.retain(|subscriber| subscriber.sender.send(internal_event.clone()).is_ok());
 }
