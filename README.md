@@ -60,15 +60,13 @@ have never been tested in system space.
 > - Replace varlink-crate by zlink-crate when zlink-crate reaches 1.0.
 >
 > ### ddc-ci-dbus
-> The ddc-ci-dbus daemon is mostly complete. 
+> The ddc-ci-dbus daemon is now fully implemented. 
 > Most methods and properties are now fully functional. Event handing
 > is also complete. 
 >
 > The daemon now fully delivers
 > the functionality required by [vdu_controls]([vdu_controls](https://digitaltrails.github.io/vdu_controls/)). 
->
-> A few minor methods and properties are still stubbed to
-> return dummy results.
+
 
 An attempt has been made to keep the code compact and the abstractions relatively
 shallow. Providing you know Rust and a little about [varlink](https://varlink.org/) or D-Bus, the
