@@ -10,7 +10,7 @@
 use base64::Engine;
 use base64::engine::general_purpose;
 use crossbeam_channel::{Receiver, unbounded};
-use ddcutil_backend::ddcutil::{CapabilitiesData, InternalEvent, VcpFeatureMetadata, InternalEventPayload};
+use ddcutil_backend::ddcutil::{CapabilitiesData, InternalEvent, VcpFeatureMetadata, InternalEventType};
 use ddcutil_backend::{ddcutil, is_env_enabled};
 use log::{LevelFilter, debug, error, info};
 use std::collections::HashMap;
@@ -721,45 +721,52 @@ pub fn forward_events_as_signals(internal_event_receiver: Receiver<InternalEvent
         // TODO let sender_str: String = hdr.sender().map(|name| name.to_string()).unwrap_or_else(|| "unknown".to_string());
 
 
-        match event.payload {
-            InternalEventPayload::VcpChange(data) => {
-                info!("forward_event_as_signal: vcp_value_changed: {:?}", data);
+        match event.internal_event_type {
+            InternalEventType::VcpChange => {
+                info!("forward_event_as_signal: vcp_value_changed: {:?}", event);
+                let data = event.vcp_event_details.unwrap();
                 if let Err(e) = zbus::block_on(DdcCiDbusService::vcp_value_changed(
                     &signal_emitter,
                     data.display_number,
-                    &data.edid_base64,
+                    &event.edid_base64,
                     data.vcp_code,
                     data.new_value,
                     &event.origin,
                     &data.client_context,
-                    0,
+                    event.flags,
                 )) {
                     log::error!("Failed to broadcast set_vcp event over bus: {}", e);
                 }
             }
-            InternalEventPayload::DisplayConnection(data) => {
-                info!("forward_event_as_signal: connected_displays_changed: event_type={:?}", data);
+            InternalEventType::Connected | InternalEventType::Disconnected => {
+                info!("forward_event_as_signal: connected_displays_changed: event_type={:?}", event);
                 if let Err(e) = zbus::block_on(DdcCiDbusService::connected_displays_changed(
                     signal_emitter,
-                    &data.edid_base64,
-                    data.ddcutil_event_type,
-                    0,
+                    &event.edid_base64,
+                    event.ddcutil_event_type,
+                    event.flags,
                 )) {
                     log::error!("Failed to broadcast display change event over bus: {}", e);
                 }
             }
-            InternalEventPayload::DpmsChange(data) => {
-                info!("forward_event_as_signal: connected_displays_changed: event_type={:?}", data);
-                let event_type = if data.edid_base64.is_empty() {
-                    DdcCiDbusDisplayEventType::DisplayDisconnected as i32
-                } else {
-                    DdcCiDbusDisplayEventType::DisplayConnected as i32
-                };
+            InternalEventType::DpmsAwake | InternalEventType::DpmsAsleep => {
+                info!("forward_event_as_signal: connected_displays_changed: event_type={:?}", event);
+                 if let Err(e) = zbus::block_on(DdcCiDbusService::connected_displays_changed(
+                    signal_emitter,
+                    &event.edid_base64,
+                    event.ddcutil_event_type,
+                    event.flags,
+                )) {
+                    log::error!("Failed to broadcast display change event over bus: {}", e);
+                }
+            }
+            _ => {
+                info!("forward_event_as_signal: unknown event_type={:?}", event);
                 if let Err(e) = zbus::block_on(DdcCiDbusService::connected_displays_changed(
                     signal_emitter,
-                    &data.edid_base64,
-                    event_type,
-                    0,
+                    &event.edid_base64,
+                    event.ddcutil_event_type,
+                    event.flags,
                 )) {
                     log::error!("Failed to broadcast display change event over bus: {}", e);
                 }

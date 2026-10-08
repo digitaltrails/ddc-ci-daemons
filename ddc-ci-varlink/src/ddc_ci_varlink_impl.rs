@@ -12,7 +12,7 @@ use std::sync::atomic::Ordering;
 use base64::{engine::general_purpose, Engine as _};
 use varlink::StringHashMap;
 use ddcutil_backend::ddcutil;
-use ddcutil_backend::ddcutil::{InternalEvent, DisplayInfo, InternalEventPayload};
+use ddcutil_backend::ddcutil::{InternalEvent, DisplayInfo, InternalEventType};
 
 
 /// Logs the Varlink call method name and parameters for debugging.
@@ -583,25 +583,26 @@ fn convert_capabilities_data(
 /// Converts our internal 'DdcEvent' item into a varlink 'Event' item.
 pub fn convert_internal_event(internal_event: InternalEvent) -> Option<Event> {
 
-    match internal_event.payload {
-        InternalEventPayload::VcpChange(data) => {
+    match internal_event.internal_event_type {
+        InternalEventType::VcpChange => {
+            let vcp_event_details = internal_event.vcp_event_details.unwrap();
             let data = serde_json::json!({
-                "event_type": data.internal_event_type,
+                "event_type": internal_event.internal_event_type.as_str(),
                 "origin": internal_event.origin,  // for now this is the only origin for set vcp
-                "display_number": data.display_number,
-                "edid_base64": data.edid_base64,
-                "vcp_code": data.vcp_code,
-                "new_value": data.new_value,
-                "client_context": data.client_context,}).to_string();
+                "display_number": vcp_event_details.display_number,
+                "edid_base64": internal_event.edid_base64,
+                "vcp_code": vcp_event_details.vcp_code,
+                "new_value": vcp_event_details.new_value,
+                "client_context": vcp_event_details.client_context,}).to_string();
             Some(Event {
                 kind: Event_kind::vcp_changed,
                 data,
             })
         }
-        InternalEventPayload::DisplayConnection(data) => {
+        InternalEventType::Connected | InternalEventType::Disconnected => {
             let data = serde_json::json!({
-                "edid_base64": data.edid_base64,
-                "event_type": data.internal_event_type,
+                "edid_base64": internal_event.edid_base64,
+                "event_type": internal_event.internal_event_type.as_str(),
                 "origin": internal_event.origin,
                 "flags": 0,
             }).to_string();
@@ -611,15 +612,29 @@ pub fn convert_internal_event(internal_event: InternalEvent) -> Option<Event> {
             })
         }
 
-        InternalEventPayload::DpmsChange(data) => {
-            let data =      serde_json::json!({
-                 "event_type": data.internal_event_type,
+        InternalEventType::DpmsAwake | InternalEventType::DpmsAsleep => {
+            let data = serde_json::json!({
+                 "event_type": internal_event.internal_event_type.as_str(),
                  "origin": internal_event.origin,
-                 "edid_base64": data.edid_base64,
-                 "awake": data.awake,
+                 "edid_base64": internal_event.edid_base64,
+                 "awake": internal_event.internal_event_type == InternalEventType::DpmsAwake,
                  "flags": 0,
                 })
                 .to_string();
+            Some(Event {
+                kind: Event_kind::connected_displays_changed,
+                data,
+            })
+        }
+        
+        _ => {
+            let data = serde_json::json!({
+                 "event_type": internal_event.internal_event_type.as_str(),
+                 "origin": internal_event.origin,
+                 "edid_base64": internal_event.edid_base64,
+                 "flags": 0,
+                })
+            .to_string();
             Some(Event {
                 kind: Event_kind::connected_displays_changed,
                 data,

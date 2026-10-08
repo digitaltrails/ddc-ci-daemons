@@ -6,7 +6,7 @@
 //! This module wraps the underlying unsafe C API provided by `libddcutil` to
 //! manage monitor settings using native Rust types and proper ownership rules.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use crate::ffi_wrapper::*;
 use base64::{engine::general_purpose, Engine as _};
 use crossbeam_channel::Sender;
@@ -19,7 +19,7 @@ use std::os::raw::{c_char, c_int};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use crate::connectivity_polling::PollingController;
 use crate::{is_env_enabled};
 use crate::ddcutil::InternalEventType::Connected;
@@ -48,7 +48,12 @@ macro_rules! ddca_call {
 
 static NEED_POLL: AtomicBool = AtomicBool::new(false);
 
-static INTERNAL_EVENT_SENDER: OnceLock<Sender<InternalEvent>> = OnceLock::new();
+pub struct NativeContext {
+    pub internal_event_sender: Sender<InternalEvent>,
+    pub internal_event_tracker: Arc<Mutex<EventTracker>>,
+}
+
+pub(crate) static NATIVE_CONTEXT_INSTANCE: OnceLock<NativeContext> = OnceLock::new();
 
 pub type DisplayRef = usize;
 
@@ -210,7 +215,7 @@ pub enum InternalEventClass {  // TODO - this seems unnecessary - see if that's 
 }
 
 /// Specific event ddcutil type
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Hash, Eq)]
 pub enum InternalEventType {
     VcpChange,
     Connected,
@@ -405,13 +410,25 @@ impl DisplayManager {
         // Must run after init(). Calling it earlier leaves watching disabled
         // and start_watch_displays fails with -3014.
         register_callback(Some(native_ddc_event_callback))?;
+        let polling_controller = PollingController::new();
+        let internal_event_tracker = EventTracker{
+            history: VecDeque::new(),
+            window: Duration::from_secs(polling_controller.get_interval() as u64),
+            max_history: 100,
+        };
+        let tracker = Arc::new(Mutex::new(internal_event_tracker));
         let manager = Self {
             lock: Arc::new(Mutex::new(())),
-            polling_controller: Arc::from(PollingController::new(internal_event_sender.clone())),
+            polling_controller: Arc::from(polling_controller),
         };
         // Store the sender globally for the native C callback
-        let sender = internal_event_sender.clone();
-        (match INTERNAL_EVENT_SENDER.set(sender).map_err(|_| ()) {
+
+        let native_context = NativeContext {
+            internal_event_sender,
+            internal_event_tracker: tracker.clone(),
+        };
+
+        (match NATIVE_CONTEXT_INSTANCE.set(native_context).map_err(|_| ()) {
             Ok(_) => Ok(()),
             Err(_) => Err(Error::AlreadySetCallbackSender),
         })?;
@@ -821,9 +838,9 @@ fn set_vcp(handle: &DisplayHandle, vcp_code: u8, value: u16, verify: bool, clien
         handle.dref, vcp_code, value, client_context,
     );
     // Send to the channel
-    if let Some(sender) = INTERNAL_EVENT_SENDER.get() {
+    if let Some(native_context) = NATIVE_CONTEXT_INSTANCE.get() {
         info!("set_vcp: sending event {:?}", internal_event);
-        let _ = sender.send(internal_event);
+        let _ = native_context.internal_event_sender.send(internal_event);
     }
     else {
         error!("set_vcp: cannot send event: internal event sender not set.");
@@ -1116,9 +1133,14 @@ extern "C" fn native_ddc_event_callback(native_event: DDCA_Display_Status_Event)
     let internal_event = build_event_from_ddca_event(native_event);  // side effect sets NEED_POLL
 
     // Send to the channel (if initialized) - If the receiver is gone, just drop the event – no harm.
-    if let Some(sender) = INTERNAL_EVENT_SENDER.get() {
-        info!("native_ddc_event_callback: sending libddcutil-event converted to internal-event: {:?}", internal_event);
-        let _ = sender.send(internal_event);
+    if let Some(native_context) = NATIVE_CONTEXT_INSTANCE.get() {
+        if native_context.internal_event_tracker.lock().unwrap().record(internal_event.clone()) {
+            info!("native_ddc_event_callback: sending libddcutil-event converted to internal-event: {:?}", internal_event);
+            let _ = native_context.internal_event_sender.send(internal_event);
+        } else {
+            debug!("suppressed duplicate event: {:?}", internal_event);
+        }
+
     }
     else {
         error!("native_ddc_event_callback: cannot handle libddcutil-event: internal event sender not set.");
@@ -1132,7 +1154,7 @@ extern "C" fn native_ddc_event_callback(native_event: DDCA_Display_Status_Event)
 
 #[derive(Debug, Clone)]
 pub struct VcpEventData {
-    pub internal_event_type: String,  // TODO maybe this field belongs in InternalEvent along with origin??
+    //pub internal_event_type: String,  // TODO maybe this field belongs in InternalEvent along with origin??
     pub display_number: i32,
     pub edid_base64: String,
     pub vcp_code: u8,
@@ -1142,7 +1164,7 @@ pub struct VcpEventData {
 
 #[derive(Debug, Clone)]
 pub struct ConnectEventData {
-    pub internal_event_type: String,
+    //pub internal_event_type: String,
     pub edid_base64: String,
     pub ddcutil_event_type: i32,
     pub flags: u32,
@@ -1150,7 +1172,7 @@ pub struct ConnectEventData {
 
 #[derive(Debug, Clone)]
 pub struct DpmsEventData {
-    pub internal_event_type: String,
+    //pub internal_event_type: String,
     pub edid_base64: String,
     pub awake: bool,
     pub flags: u32,
@@ -1164,10 +1186,85 @@ pub enum InternalEventPayload {
 }
 
 #[derive(Debug, Clone)]
-pub struct InternalEvent {
-    pub origin: String,
-    pub payload: InternalEventPayload,
+pub struct InternalVcpEventDetails {
+    pub display_number: i32,
+    pub vcp_code: u8,
+    pub new_value: u16,
+    pub client_context: String,
 }
+
+#[derive(Debug, Clone)]
+pub struct InternalEvent {
+    pub internal_event_type: InternalEventType,
+    pub origin: String,
+    pub edid_base64: String,
+    pub ddcutil_event_type: i32,
+    pub flags: u32,
+    pub vcp_event_details: Option<InternalVcpEventDetails>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum EventSource { Native, Polling }
+
+#[derive(PartialEq, Eq, Hash, Clone, Debug)]
+struct EventKey {
+    edid_base64: String,
+    internal_event_type: InternalEventType,
+}
+
+impl From<&InternalEvent> for EventKey {
+    fn from(e: &InternalEvent) -> Self {
+        Self {
+            edid_base64: e.edid_base64.clone(),
+            internal_event_type: e.internal_event_type.clone(),
+        }
+    }
+}
+
+struct EventRecord {
+    event: InternalEvent,
+    key: EventKey,
+    at: Instant,
+}
+
+pub struct EventTracker {
+    history: VecDeque<EventRecord>,
+    window: Duration,
+    max_history: usize,
+}
+
+impl EventTracker {
+    /// Returns true if this event is new, false if an equivalent event
+    /// from the other source was recorded within `window`.
+    pub(crate) fn record(&mut self, event: InternalEvent) -> bool {
+        let now = Instant::now();
+
+        while let Some(front) = self.history.front() {
+            if now.duration_since(front.at) > self.window {
+                self.history.pop_front();
+            } else { break; }
+        }
+
+        let key = EventKey::from(&event);
+        debug!("event #{} key={:?}", self.history.len(), key);
+
+        // libddcutil won't supply edid for disconnected, only polling does that
+        let duplicate = self.history.iter()
+            .any(|r|
+                (r.key == key ||
+                    (r.key.internal_event_type == InternalEventType::Disconnected
+                        && key.internal_event_type == InternalEventType::Disconnected)
+                ) && r.event.origin != event.origin);
+
+        self.history.push_back(EventRecord { event, key, at: now });
+        while self.history.len() > self.max_history {
+            self.history.pop_front();
+        }
+
+        !duplicate
+    }
+}
+
 fn build_event_from_ddca_event(event: DDCA_Display_Status_Event) -> InternalEvent {
     // Map the C event type to our Rust enum
     #[allow(non_upper_case_globals)]
@@ -1204,16 +1301,13 @@ fn build_event_from_ddca_event(event: DDCA_Display_Status_Event) -> InternalEven
         "".to_string()
     };
 
-    let payload = InternalEventPayload::DisplayConnection(ConnectEventData {
-        internal_event_type: internal_event_type.as_str().to_owned(),
+    InternalEvent {
+        internal_event_type,
+        origin: "libddcutil".to_string(),
         edid_base64,
         ddcutil_event_type: event.event_type as i32,
-        flags: 0
-    });
-
-    InternalEvent {
-        origin: "libddcutil".to_string(),
-        payload
+        flags: 0,
+        vcp_event_details: None,
     }
 }
 
@@ -1232,20 +1326,20 @@ fn build_set_vcp_event(dref: DisplayRef, vcp_code: u8, new_value: u16, client_co
         ("".to_string(), -99)
     };
 
-    let data = VcpEventData {
-        internal_event_type: InternalEventType::VcpChange.as_str().to_string(),
+    let data = InternalVcpEventDetails {
         display_number,
-        edid_base64,
         vcp_code,
         new_value,
         client_context: client_context.to_string(),
     };
 
-    let payload = InternalEventPayload::VcpChange(data);
-
     InternalEvent {
+        internal_event_type: InternalEventType::VcpChange,
         origin: "ddc-ci".to_string(),
-        payload
+        edid_base64,
+        ddcutil_event_type: 0,
+        flags: 0,
+        vcp_event_details: Some(data),
     }
 }
 
@@ -1290,36 +1384,32 @@ pub fn build_hotplug_event(edid_base64: &String, event_type: InternalEventType) 
         DDCA_Display_Event_Type_DDCA_EVENT_DISPLAY_DISCONNECTED
     };
 
-    let data = ConnectEventData {
-        internal_event_type: event_type.as_str().to_string(),
+    InternalEvent {
+        internal_event_type: event_type,
+        origin: "polling".to_string(),
         edid_base64: edid_base64.to_string(),
         ddcutil_event_type: ddcutil_event_type as i32,
         flags: 0,
-    };
-
-    let payload = InternalEventPayload::DisplayConnection(data);
-
-    InternalEvent {
-        origin: "polling".to_string(),
-        payload,
+        vcp_event_details: None,
     }
 }
 
 /// Builds an event for DPMS awake or asleep.
-pub fn build_dpms_event(edid: &String, event_type: InternalEventType) -> InternalEvent {
+pub fn build_dpms_event(edid_base64: &String, event_type: InternalEventType) -> InternalEvent {
 
-    let data = DpmsEventData {
-        internal_event_type: event_type.as_str().to_string(),
-        edid_base64: edid.to_string(),
-        awake: InternalEventType::DpmsAwake == event_type,
-        flags: 0,
+    let ddcutil_event_type = if event_type == InternalEventType::DpmsAwake {
+        DDCA_Display_Event_Type_DDCA_EVENT_DPMS_AWAKE
+    } else {
+        DDCA_Display_Event_Type_DDCA_EVENT_DPMS_ASLEEP
     };
 
-    let payload = InternalEventPayload::DpmsChange(data);
-
     InternalEvent {
+        internal_event_type: event_type,
         origin: "polling".to_string(),
-        payload
+        edid_base64: edid_base64.to_string(),
+        ddcutil_event_type: ddcutil_event_type as i32,
+        flags: 0,
+        vcp_event_details: None,
     }
 }
 

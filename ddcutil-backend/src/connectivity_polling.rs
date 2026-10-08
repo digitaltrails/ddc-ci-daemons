@@ -6,7 +6,7 @@
 //! (libddcutil does not handle DPMS and on some hardware cannot detect
 //! connectivity changes)
 
-use crate::{ddcutil};
+use crate::{ddcutil, is_env_enabled};
 use crate::ddcutil::{DisplayManager, DisplayRef, InternalEvent, InternalEventType};
 
 use base64::{engine::general_purpose, Engine as _};
@@ -17,19 +17,16 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-
 #[derive(Clone)]
 pub struct PollingController {
     state: Arc<Mutex<PollingSharedState>>,
-    event_sender: Sender<InternalEvent>,
 }
 
 impl PollingController {
 
-    pub fn new(event_sender: Sender<InternalEvent>) -> Self {
+    pub fn new() -> Self {
         PollingController {
             state: Arc::new(Mutex::new(PollingSharedState::default())),
-            event_sender,
         }
     }
 
@@ -49,10 +46,9 @@ impl PollingController {
 
         let state_arc = self.state.clone();
         let display_manager_clone = display_manager.clone();
-        let internal_event_sender = self.event_sender.clone();
 
         let handle = thread::spawn(move || {
-            polling_loop(state_arc, &display_manager_clone, internal_event_sender, shutdown_listener);
+            polling_loop(state_arc, &display_manager_clone, shutdown_listener);
         });
 
         state.poll_thread = Some(handle);
@@ -117,6 +113,7 @@ pub struct PollingSharedState {
     pub poll_cascade_secs: f64,
     pub poll_do_redetect: bool,  // This is probably only ever needed if linked against libddcutil version <= 2.1
     pub events_enabled: bool,
+    pub ignore_duplicates: bool,
     // Polling thread management
     pub poll_thread: Option<thread::JoinHandle<()>>,
     pub shutdown_dispatcher: Option<Sender<()>>,
@@ -124,23 +121,21 @@ pub struct PollingSharedState {
 
 impl Default for PollingSharedState {
     fn default() -> Self {
-        let poll_do_detect = std::env::var("DDC_CI_POLL_DO_REDETECT")
-        .map(|val| val.to_lowercase() == "true" || val == "1")
-        .unwrap_or(false); // Fallback default if env var is not set
-        info!("Environment variable DDC_CI_POLL_DO_REDETECT={} (not needed for libddcutil >= 2.2)",
-              poll_do_detect);
+        let poll_do_redetect = is_env_enabled("DDC_CI_POLL_DO_REDETECT", false);
+        // Polling can detect some of the same events as libddcutil, but with more info, such
+        // as the edid of a display that has disconnected, should duplicates be ignored or forwarded.
+        let ignore_duplicates = is_env_enabled("DDC_CI_POLL_IGNORE_DUPLICATES", true);
         Self {
             poll_interval_secs: 30,
             poll_cascade_secs: 0.5,
-            poll_do_redetect: poll_do_detect,
+            poll_do_redetect,
             events_enabled: false,
+            ignore_duplicates,
             poll_thread: None,
             shutdown_dispatcher: None,
         }
     }
 }
-
-
 
 /// State of a single display for the polling loop.
 #[derive(Debug, Clone, Copy)]
@@ -154,7 +149,6 @@ struct DisplayState {
 pub fn polling_loop(
     state: Arc<Mutex<PollingSharedState>>,
     display_manager: &DisplayManager,
-    internal_event_sender: Sender<InternalEvent>,
     shutdown_request_receiver: Receiver<()>,
 ) {
     debug!("Starting polling loop");
@@ -175,13 +169,14 @@ pub fn polling_loop(
 
         // ---- Acquire the lock and read config ----
 
-        let (interval, cascade, do_redetect, events_enabled) = {
+        let (interval, cascade, do_redetect, events_enabled, ignore_duplicates) = {
             let cfg = state.lock().unwrap();
             (
                 cfg.poll_interval_secs,
                 cfg.poll_cascade_secs,
                 cfg.poll_do_redetect,
                 cfg.events_enabled,
+                cfg.ignore_duplicates,
             )
         };
 
@@ -256,15 +251,11 @@ pub fn polling_loop(
 
         if !initializing {
             for lost_edid in lost_connection {
-                let internal_event = ddcutil::build_hotplug_event(lost_edid, InternalEventType::Disconnected);
-                info!("poll: sending connection change event {:?}", internal_event);
-                let _ = internal_event_sender.send(internal_event);
+                send_event(ddcutil::build_hotplug_event(lost_edid, InternalEventType::Disconnected), ignore_duplicates);
             }
 
             for new_edid in newly_detected {
-                let internal_event = ddcutil::build_hotplug_event(new_edid, InternalEventType::Connected);
-                info!("poll: sending connection change event {:?}", internal_event);
-                let _ = internal_event_sender.send(internal_event);
+                send_event(ddcutil::build_hotplug_event(new_edid, InternalEventType::Connected), ignore_duplicates);
             }
 
             // Detect DPMS changes
@@ -276,10 +267,8 @@ pub fn polling_loop(
                         } else {
                             InternalEventType::DpmsAsleep
                         };
-                        let internal_event = ddcutil::build_dpms_event(edid, event_type);
-                        debug!("poll: sending DPMS change event {:?}", internal_event);
-                        let _ = internal_event_sender.send(internal_event);
-                    }
+                        send_event(ddcutil::build_dpms_event(edid, event_type), ignore_duplicates);
+                     }
                 }
             }
         }
@@ -294,5 +283,19 @@ pub fn polling_loop(
             Duration::from_secs(interval as u64)
         };
         ddcutil::sleep_interruptible(sleep_duration);
+    }
+}
+
+fn send_event(internal_event: InternalEvent, ignore_duplicates: bool) {
+    if let Some(native_context) = crate::ddcutil::NATIVE_CONTEXT_INSTANCE.get() {
+        let unique = native_context.internal_event_tracker.lock().unwrap().record(internal_event.clone());
+        if unique || !ignore_duplicates {
+            info!("polling: sending event (unique={}) {:?}", unique, internal_event);
+            let _ = native_context.internal_event_sender.send(internal_event);
+        } else {
+            info!("polling: ignoring duplicate event {:?}", internal_event);
+        }
+    } else {
+        error!("polling: cannot send event: internal event sender not set.");
     }
 }
