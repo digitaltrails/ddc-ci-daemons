@@ -5,12 +5,6 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
 # DDC-CI daemons
 
-> [!IMPORTANT]
-> 2026/09/26: The project name, executable names, D-Bus handle names and varlink handle names 
-> have been changed to properly indicate that this is <u>not</u> a project 
-> under the official [com.ddutil](https://www.ddcutil.com/) umbrella. All the client 
-> examples have been updated to the new handles. 
-
 > [!CAUTION]
 > When using these daemons, avoid excessively writing VCP values because each VDU's
 > NVRAM likely has a write-cycle limit/lifespan. The suggested guideline is to limit
@@ -51,21 +45,16 @@ have never been tested in system space.
 > All methods in [local.ddc-ci.service.varlink](ddc-ci-varlink/varlink/local.ddc-ci.service.varlink) 
 > have now been implemented.
 > 
-> The [vdu_controls](https://digitaltrails.github.io/vdu_controls/), a control panel for 
-> displays, can be configured to use ddc-ci-varlink.
->
-> ddc-ci-Varlink development is more or less complete at this point.  Possible 
-> future work:
-> - Packaging, probably initially targeting openSUSE Tumbleweed.
-> - Replace varlink-crate by zlink-crate when zlink-crate reaches 1.0.
+> The [vdu_controls](https://digitaltrails.github.io/vdu_controls/)  control panel for 
+> displays, can be configured to use `ddc-ci-varlink`.
 >
 > ### ddc-ci-dbus
 > The ddc-ci-dbus daemon is now fully implemented. 
 > Most methods and properties are now fully functional. Event handing
-> is also complete. 
+> is also complete.
 >
-> The daemon now fully delivers
-> the functionality required by [vdu_controls]([vdu_controls](https://digitaltrails.github.io/vdu_controls/)). 
+> The [vdu_controls](https://digitaltrails.github.io/vdu_controls/) app will use `ddc-ci-dbus` if the service is available.
+
 
 
 An attempt has been made to keep the code compact and the abstractions relatively
@@ -246,5 +235,11 @@ TODO.
 
 Thanks go out to Sanford Rockowitz ([rockowitz](https://github.com/rockowitz)) 
 for [libddcutil, ddcutil](https://www.ddcutil.com/).
+
+> [!IMPORTANT]
+> 2026/09/26: The project name, executable names, D-Bus handle names and varlink handle names
+> have been changed to properly indicate that this is <u>not</u> a project
+> under the official [com.ddutil](https://www.ddcutil.com/) umbrella. All the client
+> examples have been updated to the new handles. 
 
 
