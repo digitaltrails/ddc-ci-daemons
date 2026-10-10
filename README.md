@@ -53,7 +53,8 @@ have never been tested in system space.
 > Most methods and properties are now fully functional. Event handing
 > is also complete.
 >
-> The [vdu_controls](https://digitaltrails.github.io/vdu_controls/) app will use `ddc-ci-dbus` if the service is available.
+> If the [vdu_controls](https://digitaltrails.github.io/vdu_controls/) app is configured to use D-Bus, it will 
+> prefer `ddc-ci-dbus` if available.
 
 
 
