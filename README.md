@@ -237,6 +237,12 @@ TODO.
 Thanks go out to Sanford Rockowitz ([rockowitz](https://github.com/rockowitz)) 
 for [libddcutil, ddcutil](https://www.ddcutil.com/).
 
+> [!NOTE]
+> __AI Assistance__: Thank you to DeepSeek and Gemini for providing architectural 
+> advice, initial code drafts, and helpful examples. All final code is manually 
+> audited, edited, and maintained by human hands.
+
+
 > [!IMPORTANT]
 > 2026/09/26: The project name, executable names, D-Bus handle names and varlink handle names
 > have been changed to properly indicate that this is <u>not</u> a project
