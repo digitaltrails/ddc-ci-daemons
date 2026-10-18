@@ -238,7 +238,7 @@ Thanks go out to Sanford Rockowitz ([rockowitz](https://github.com/rockowitz))
 for [libddcutil, ddcutil](https://www.ddcutil.com/).
 
 > [!NOTE]
-> __AI Assistance__: Thank you to DeepSeek and Gemini for providing architectural 
+> __AI Assistance__: DeepSeek and Gemini provided architectural 
 > advice, initial code drafts, and helpful examples. All final code is manually 
 > audited, edited, and maintained by human hands.
 
