@@ -240,7 +240,7 @@ for [libddcutil, ddcutil](https://www.ddcutil.com/).
 > [!NOTE]
 > __AI Assistance__: DeepSeek and Gemini provided architectural 
 > advice, initial code drafts, and helpful examples. All final code is manually 
-> audited, edited, and maintained by human hands.
+> audited, edited, and maintained by a human developer.
 
 
 > [!IMPORTANT]
