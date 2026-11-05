@@ -86,7 +86,7 @@ ls -1 $HOME/.cargo/bin/ddc-ci-*
 Cargo can also be used to install the executables for a single user:
 ```
 cargo install --path ddc-ci-varlink
-cargo install --path ddc-ci-sbus
+cargo install --path ddc-ci-dbus
 
 # The above normally installs to $HOME/.cargo/bin
 ls -l $HOME/.cargo/bin
