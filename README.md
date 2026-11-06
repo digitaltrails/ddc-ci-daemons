@@ -86,7 +86,7 @@ ls -1 $HOME/.cargo/bin/ddc-ci-*
 Cargo can also be used to install the executables for a single user:
 ```
 cargo install --path ddc-ci-varlink
-cargo install --path ddc-ci-sbus
+cargo install --path ddc-ci-dbus
 
 # The above normally installs to $HOME/.cargo/bin
 ls -l $HOME/.cargo/bin
@@ -140,7 +140,7 @@ To run the varlink service via systemd for a single user, create the following
 service files and confirm the executable `ExecStart` location. 
 
 ```
-# $HOME/.local/share/systemd/user/user/ddc-ci-varlink.service                                                                                                                      ✔  10664  09:32:53
+# $HOME/.local/share/systemd/user/ddc-ci-varlink.service                                                                                                                      ✔  10664  09:32:53
 [Unit]
 Description=DDC CI Varlink Service
 Requires=ddc-ci-varlink.socket
@@ -156,7 +156,7 @@ WantedBy=default.target
 ```
 
 ```
-# $HOME/.local/share/systemd/user/user/ddc-ci-varlink.socket
+# $HOME/.local/share/systemd/user/ddc-ci-varlink.socket
 [Unit]
 Description=DDC CI Varlink Service Socket
 
